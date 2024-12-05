@@ -161,16 +161,16 @@ gc()
 
 ## assessment dates, age at assessments and sex
 dems <- data_all %>% 
-  select(c(eid, starts_with(c('X31.', 'X34.', 'X52.', 'X48.')))) %>%
+  select(c(eid, starts_with(c('X31.', 'X34.', 'X52.', 'X48.', 'X191.')))) %>%
   rename(sex = X31.0.0, birth_year = X34.0.0, birth_month = X52.0.0,
-         waist_0 = 'X48.0.0') %>%
+         waist_0 = 'X48.0.0', loss_to_followup = 'X191.0.0') %>%
   select(-starts_with('X'))
 dems$birth_year <- as.character(dems$birth_year); dems$birth_month <- 
   as.character(dems$birth_month)
 dems$birth_date <- as.Date(paste0('01/', dems$birth_month, '/' ,dems$birth_year), 
                            format = '%d/%m/%Y')
 dems <- rename(dems, id = eid)
-write.csv(select(dems, -waist_0), 'output_files/age_sex_formatted.csv')
+write.csv(select(dems, -c(waist_0, loss_to_followup)), 'output_files/age_sex_formatted.csv')
 
 
 
@@ -1163,6 +1163,5 @@ covs$id <- as.character(covs$id)
 
 # export and clear environment
 saveRDS(covs, 'output_files/covariates.Rds')
-saveRDS(loss_to_followup, 'output_files/loss_to_followup.Rds')
 rm(list = ls())
 gc()
