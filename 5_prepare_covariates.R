@@ -1150,7 +1150,7 @@ covs <- Reduce(function(x, y) merge(x, y, by = 'id', all = TRUE),
   mutate(across(c(vision_problem, sleep_dis_any, cerebrovascular,
                   respiratory, hepatic, flu, heart, cancer_colon, 
                   cancer_prostate, cancer_lung, cancer_breast, cancer_ovary,
-                  cns_cancer, cns_any), 
+                  cancer_prostate_ovary, cns_cancer, cns_any), 
                 ~ replace_na(., 0)))
 # 99 dummy value to NA
 covs[covs == 99] <- NA
