@@ -178,7 +178,8 @@ write.csv(select(dems, -waist_0), 'output_files/age_sex_formatted.csv')
 ## loss to follow-up
 loss_to_followup <- data_all %>%
   select(eid, starts_with(c('X191.'))) %>%
-  rename(id = eid)
+  rename(id = eid,
+         loss_to_followup = X191.0.0)
 
 
 
