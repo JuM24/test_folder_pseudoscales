@@ -175,6 +175,14 @@ write.csv(select(dems, -waist_0), 'output_files/age_sex_formatted.csv')
 
 
 
+## loss to follow-up
+loss_to_followup <- data_all %>%
+  select(eid, starts_with(c('X191.'))) %>%
+  rename(id = eid)
+
+
+
+
 ## smoking
 smoking <- data_all %>%
   select(eid, X20116.0.0)
@@ -1154,5 +1162,6 @@ covs$id <- as.character(covs$id)
 
 # export and clear environment
 saveRDS(covs, 'output_files/covariates.Rds')
+saveRDS(loss_to_followup, 'output_files/loss_to_followup.Rds')
 rm(list = ls())
 gc()
