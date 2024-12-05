@@ -13,7 +13,6 @@ data_all <- readRDS('vars_pseudoscales.Rds')
 # define time period used
 # c(2015) for main analysis or c(2004, 2005, 2006) for sensitivity analysis
 relevant_years <- c(2015) 
-suff <- '2015'
 
 
 
@@ -48,7 +47,6 @@ scales <- filter(scales, drug %in% unique(meds$name_generic))
 scales <- scales %>%
   mutate(n = rowSums(select(., -drug) > 0, na.rm = TRUE))
 write.csv(scales, 'output_files/aas_in_sample.csv', row.names = FALSE)
-
 scales$n <- NULL
 
 # to numeric
@@ -61,15 +59,17 @@ scales <- scales[2:nrow(scales), ]
 scales$scale <- rownames(scales)
 rownames(scales) <- seq(1,23)
 
+first_col <- colnames(scales[1])
+last_col <- colnames(scales[ncol(select(scales, -scale))])
 scales <- scales %>%
   rowwise() %>%
   mutate(
-    count_4 = sum(c_across(X1:X242) == 4),
-    count_3 = sum(c_across(X1:X242) == 3),
-    count_2 = sum(c_across(X1:X242) == 2),
-    count_1 = sum(c_across(X1:X242) == 1),
-    count_05 = sum(c_across(X1:X242) == 0.5),
-    count_any = sum(c_across(X1:X242) > 0)
+    count_4 = sum(c_across({{first_col}}:{{last_col}}) == 4),
+    count_3 = sum(c_across({{first_col}}:{{last_col}}) == 3),
+    count_2 = sum(c_across({{first_col}}:{{last_col}}) == 2),
+    count_1 = sum(c_across({{first_col}}:{{last_col}}) == 1),
+    count_05 = sum(c_across({{first_col}}:{{last_col}}) == 0.5),
+    count_any = sum(c_across({{first_col}}:{{last_col}}) > 0)
   ) %>%
   ungroup()
 
@@ -171,16 +171,6 @@ dems$birth_date <- as.Date(paste0('01/', dems$birth_month, '/' ,dems$birth_year)
                            format = '%d/%m/%Y')
 dems <- rename(dems, id = eid)
 write.csv(select(dems, -c(waist_0, loss_to_followup)), 'output_files/age_sex_formatted.csv')
-
-
-
-
-## loss to follow-up
-loss_to_followup <- data_all %>%
-  select(eid, starts_with(c('X191.'))) %>%
-  rename(id = eid,
-         loss_to_followup = X191.0.0)
-
 
 
 
@@ -364,6 +354,13 @@ dementia$dementia_date[dementia$dementia_date == as.Date('1900-01-01', format = 
 
 
 
+## delirium
+delirium <- data_all %>% select(c(eid, starts_with('X130846.')))
+colnames(delirium) <- c('id', 'delirium_date')
+delirium$delirium_date <- as.Date(delirium$delirium_date, format <- '%Y-%m-%d')
+delirium$delirium <- 0; delirium$delirium[!is.na(delirium$delirium_date)] <- 1
+
+
 ## death
 death <- data_all %>% 
   select(c(eid, X40000.0.0))
@@ -448,7 +445,6 @@ hyperchol$hyperlip_date[hyperchol$hyperlip_date ==
 ## visual impairment, sleep disorders
 sleep_vision <- data_all %>%
   select(eid, starts_with(c('X131212.', 'X131060.', 'X130920.'))) %>%
-  filter(rowSums(across(starts_with('X')) == '') < 3) %>%
   mutate(across(starts_with('X'), ~as.Date(., format = '%Y-%m-%d'))) %>%
   mutate(sleep_dis_any_date = reduce(across(c('X131060.0.0', 'X130920.0.0')), pmin, na.rm = TRUE)) %>%
   rename(id = eid, vision_problem_date = X131212.0.0) %>%
