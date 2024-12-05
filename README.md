@@ -8,6 +8,7 @@ Field ID | Description
 ----------- | -----
 `31` |	Sex
 `34`, `52` |	Year and month of birth
+`191` |	Date lost to follow-up
 `53` |	Date of attending assessment centre
 `48` |	Waist circumference
 `189` |	Townsend deprivation index at recruitment
