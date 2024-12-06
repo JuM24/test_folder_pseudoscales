@@ -394,8 +394,8 @@ prepare_scales <- function(version, outcome_name, year_range = c(2015, 2015)){
                     cns_demyel, cns_parox, cns_other, cns_tbi, cns_cancer,
                     vision_problem, sleep_dis_any, endocrine_dis, nutr_dis, 
                     metabolic_dis, cerebrovascular, respiratory, hepatic, flu, 
-                    heart, dementia, cancer_colon, cancer_prostate_ovary, cancer_lung, 
-                    cancer_breast, cancer_ovary, 
+                    heart, dementia, delirium, cancer_colon, cancer_prostate_ovary, 
+                    cancer_lung, cancer_breast, cancer_ovary,
                     starts_with(c('data_prov', 'education', 'alc_freq', 'smoking', 
                                   'phys_act', 'depressed', 'lonely', 'soc_isol'))), 
                   as.factor))
