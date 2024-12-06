@@ -1135,6 +1135,186 @@ hear <- transform(hear, date_hear_loss_any =
 rm(diagnoses, diagnosis_codes, gp_diagnoses, read2, read3, inpatient)
 gc()
 
+## source of inpatient diagnosis 
+# TODO (from doi: )
+
+# get source from uk field ID 40022 (for those that have been to hospital and have just one data provider, this is the default)
+inpatient_source <- data_all %>% 
+  select(c(eid, starts_with(c('X40022.'))))
+inpatient_source[inpatient_source == ''] <- NA
+
+# set aside those with several sources
+multi_source <- filter(inpatient_source, !is.na(X40022.0.1)) %>% select(eid)
+
+# get most common source of hospital diagnoses for those with several records
+diagnoses_dates <- read.csv('hesin.txt', sep='\t')  # UKB category 2006
+diagnoses_dates$epistart <- as.Date(diagnoses_dates$epistart, format = '%d/%m/%Y')
+
+# those with just one data provider throughout the entire period
+inpatient_constant <- inpatient_source %>%
+  filter(!eid %in% multi_source$eid) %>%
+  rename(id = eid, data_provider = X40022.0.0) %>%
+  select(id, data_provider)
+
+# those with several data providers
+inpatient_flux_freq <- diagnoses_dates %>%
+  filter(eid %in% multi_source$eid) %>% # just resolve those with several data providers
+  group_by(eid, dsource) %>% # group by data provider and id
+  summarise(count = n()) %>% # count number of instances for id-source combo
+  ungroup() %>%
+  arrange(desc(count)) %>% # arrange descending
+  distinct(eid, .keep_all = TRUE) %>% # just keep first (more frequent) instance
+  rename(id = eid, data_provider = dsource) %>%
+  select(id, data_provider)
+
+# combine all most frequent inpatient data providers (i.e., for those with just one plus those with several)
+inpatient_freq <- rbind(inpatient_constant, inpatient_flux_freq) %>%
+  filter(!is.na(data_provider)) # remove those that never went to hospital
+
+# get latest date of hospital diagnoses for those with multiple data providers (to determine censoring later on) 
+diagnoses_dates_dt <- diagnoses_dates %>%
+  filter(eid %in% multi_source$eid) %>%
+  filter(!is.na(epistart)) %>%
+  data.table::as.data.table(diagnoses_dates)
+inpatient_flux_last <- as.data.frame(diagnoses_dates_dt[, .(epistart = max(epistart, na.rm = TRUE)), by = eid])
+inpatient_flux_last <- merge(inpatient_flux_last, subset(diagnoses_dates, select = c(eid, epistart, dsource)), 
+                             by = c('eid', 'epistart'), all.x = TRUE) %>%
+  rename(id = eid, data_provider = dsource) %>%
+  select(id, data_provider) %>%
+  distinct(id, .keep_all = TRUE)
+
+# combine all latest inpatient data providers
+inpatient_last <- rbind(inpatient_constant, inpatient_flux_last) %>%
+  filter(!is.na(data_provider))
+
+
+### Now we have a data frame with the most frequently occurring and latest data providers for each participant.
+### We still have missing data for those that were never admitted to hospital; for those, we will use primary
+### care data to impute.
+
+
+# For those that do not have inpatient data providers, we will first use GP registrations to fill the gaps
+gp_reg <- read.csv('gp_registrations.txt', sep='\t', header=TRUE, quote='') %>% rename(id = eid)
+gp_reg[gp_reg == ''] <- NA
+gp_reg <- gp_reg %>%
+  select(id, data_provider, reg_date, deduct_date) %>%
+  mutate(across(c(reg_date, deduct_date), ~as.Date(., format = '%d/%m/%Y')))
+
+# set aside those that were always registered with just one data provider
+gp_reg_constant <- gp_reg %>%
+  group_by(id, data_provider) %>%
+  summarise(count = n()) %>%
+  ungroup()
+gp_reg_constant <- gp_reg_constant %>%
+  filter(!id %in% gp_reg_constant$id[duplicated(gp_reg_constant$id)]) %>%
+  select(id, data_provider)
+
+# focus on those that changed primary care data providers
+gp_reg_flux <- gp_reg %>%
+  filter(!id %in% gp_reg_constant$id)
+gp_reg_flux$reg_date[gp_reg_flux$reg_date %in% invalid_dates] <- NA
+gp_reg_flux$deduct_date[gp_reg_flux$deduct_date %in% invalid_dates] <- NA
+gp_reg_flux <- gp_reg_flux %>% 
+  filter(!is.na(reg_date) | !is.na(deduct_date)) # remove observations without both registration and de-registration date
+
+# people with registrations but without de-registrations were still registered 
+# with their latest GP at time of data fetch, so get dates of data fetch
+# (1= England(Vision), 2= Scotland, 3 = England (TPP), 4 = Wales)
+gp_reg_flux$deduct_date[is.na(gp_reg_flux$deduct_date) & gp_reg_flux$data_provider == '1'] <- as.Date('30/06/2017', format = '%d/%m/%Y') # England Vision
+gp_reg_flux$deduct_date[is.na(gp_reg_flux$deduct_date) & gp_reg_flux$data_provider == '2'] <- as.Date('31/05/2017', format = '%d/%m/%Y') # Scotland
+gp_reg_flux$deduct_date[is.na(gp_reg_flux$deduct_date) & gp_reg_flux$data_provider == '3'] <- as.Date('31/08/2016', format = '%d/%m/%Y') # England TPP
+gp_reg_flux$deduct_date[is.na(gp_reg_flux$deduct_date) & gp_reg_flux$data_provider == '4'] <- as.Date('30/09/2017', format = '%d/%m/%Y') # Wales
+gp_reg_flux$total_time <- as.numeric((difftime(gp_reg_flux$deduct_date, gp_reg_flux$reg_date, units = 'days')))/365.25
+
+# for registrations of people that changed data providers, calculate the length of the period of registration with each data provider
+gp_reg_flux_freq <- gp_reg_flux %>%
+  group_by(id, data_provider) %>%
+  summarise(total_time = sum(total_time)) %>%
+  arrange(desc(total_time)) %>%
+  distinct(id, .keep_all = TRUE) %>%
+  select(id, data_provider) %>%
+  ungroup()
+
+# get the latest registrations (for censoring)
+gp_reg_flux_last <- gp_reg_flux %>%
+  group_by(id, data_provider) %>%
+  arrange(desc(deduct_date)) %>%
+  ungroup() %>%
+  distinct(id, .keep_all = TRUE) %>%
+  select(id, data_provider)
+
+# combine most frequent and latest primary care data providers
+gp_reg_freq <- rbind(gp_reg_constant, gp_reg_flux_freq)
+gp_reg_last <- rbind(gp_reg_constant, gp_reg_flux_last)
+
+
+
+# for people without good registration data, we will use primary care diagnosis data
+gp_diagnoses <- data.table::fread('gp_clinical.txt', sep='\t', header=TRUE, quote='') %>%
+  as.data.frame() %>%
+  filter(!eid %in% gp_reg_freq$id) %>%
+  select(eid, data_provider, event_dt) %>%
+  mutate(across(event_dt, ~as.Date(., format = '%d/%m/%Y')))
+
+# all that are left were always diagnosed within just one data provider
+gp_diagnoses_constant <- gp_diagnoses %>%
+  group_by(eid, data_provider) %>%
+  summarise(count = n()) %>%
+  ungroup()
+gp_diagnoses_constant <- gp_diagnoses_constant %>%
+  filter(!eid %in% gp_diagnoses_constant$eid[duplicated(gp_diagnoses_constant$eid)]) %>%
+  select(eid, data_provider) %>%
+  rename(id = eid)
+
+# add to the ones identified using registration data
+gp_reg_freq <- rbind(gp_reg_freq, gp_diagnoses_constant)
+gp_reg_last <- rbind(gp_reg_last, gp_diagnoses_constant)
+
+
+### We now additionally have data frames with the most frequently occurring primary care data provider and the latest
+### data provider per participant. We now have to use this latest data for imputation.
+
+
+#### check how good the imputation is (OPTIONAL) ####
+# this is done on the subsample of people with inpatient data that also have primary care records
+check_df_freq <- merge(inpatient_freq, gp_reg_freq, by = 'id')
+table(check_df_freq$data_provider.x, check_df_freq$data_provider.y)
+
+check_df_last <- merge(inpatient_last, gp_reg_last, by = 'id')
+table(check_df_last$data_provider.x, check_df_last$data_provider.y)
+#### check how good the imputation is (OPTIONAL) ####
+
+
+
+# use the primary care data providers to supplement missing inpatient data providers 
+
+# add primary care data providers for participants without inpatient data providers
+data_provider_freq <- rbind(inpatient_freq, filter(gp_reg_freq, !id %in% inpatient_freq$id)) %>%
+  rename(data_provider_inpatient_freq = data_provider)
+# repeat for latest data provider
+data_provider_last <- rbind(inpatient_last, filter(gp_reg_last, !id %in% inpatient_last$id)) %>%
+  rename(data_provider_inpatient_last = data_provider)
+
+# harmonise naming of data providers
+data_provider_freq$data_provider_inpatient_freq[
+  data_provider_freq$data_provider_inpatient_freq == 1 | 
+    data_provider_freq$data_provider_inpatient_freq == 3] <- 'HES'
+
+data_provider_freq$data_provider_inpatient_freq[
+  data_provider_freq$data_provider_inpatient_freq == 2] <- 'SMR'
+
+data_provider_freq$data_provider_inpatient_freq[
+  data_provider_freq$data_provider_inpatient_freq == 4] <- 'PEDW'
+
+data_provider_last$data_provider_inpatient_last[
+  data_provider_last$data_provider_inpatient_last == 1 | 
+    data_provider_last$data_provider_inpatient_last == 3] <- 'HES'
+
+data_provider_last$data_provider_inpatient_last[
+  data_provider_last$data_provider_inpatient_last == 2] <- 'SMR'
+
+data_provider_last$data_provider_inpatient_last[
+  data_provider_last$data_provider_inpatient_last == 4] <- 'PEDW'
 
 
 
@@ -1142,10 +1322,10 @@ gc()
 covs <- Reduce(function(x, y) merge(x, y, by = 'id', all = TRUE), 
                list(alcohol, cognition, dems, deprivation,
                     education, phys_act, pollution, smoking,
-                    social, cancer_d, cns_dis, death, dementia, diabetes, hear, 
-                    hyperchol, hypertension,  metabolic_dis, mood_ado, 
-                    nutr_dis, outcomes, psych_ado, sleep_vision,
-                    endocrine_dis)) %>%
+                    social, cancer_d, cns_dis, death, dementia, delirium,
+                    diabetes, hear, hyperchol, hypertension,  metabolic_dis, 
+                    mood_ado, nutr_dis, outcomes, psych_ado, sleep_vision,
+                    endocrine_dis, data_provider_freq, data_provider_last)) %>%
   # NAs to 0s
   mutate(across(c(vision_problem, sleep_dis_any, cerebrovascular,
                   respiratory, hepatic, flu, heart, cancer_colon, 
