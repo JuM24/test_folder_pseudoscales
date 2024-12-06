@@ -195,44 +195,26 @@ combine_scales <- function(version = '', j_max = 20,  years = c(2015, 2015)){
 #   - it saves the output to disk in the current directory
 
 
-prepare_scales <- function(version, file_name, outcome_name, year_range = c(2000, 2005)){
+prepare_scales <- function(version, outcome_name, year_range = c(2015, 2015)){
   library(tidyverse)
   library(lubridate)
   
   start_year <- year_range[1]
   stop_year <- year_range[length(year_range)]
   
-  date_outcome <- paste('date_', outcome_name, sep = '')
-  year_outcome <- paste('year_', outcome_name, sep = '')
-  subsample_outcome <- paste('subsample_', outcome_name, sep = '')
+  date_outcome <- paste0(outcome_name, '_date')
+  year_outcome <- paste0(outcome_name, '_year')
   
-  outcome <- read.csv(file_name)[, 1:2]
-  colnames(outcome) <- c('id', date_outcome)
-  outcome[outcome == ''] <- NA
-  
-  # add indicator variable and year variable for outcome
-  outcome[[outcome_name]] <- 0
-  outcome[[outcome_name]][!is.na(outcome[[date_outcome]])] <- 1
-  outcome[[outcome_name]][outcome[[date_outcome]] %in% 
-                            c("1900-01-01", "1901-01-01", 
-                              "1902-02-02", "1903-03-03", "2037-07-07")] <- NA
-  outcome[[date_outcome]][outcome[[date_outcome]] %in% 
-                            c("1900-01-01", "1901-01-01", "1902-02-02", 
-                              "1903-03-03", "2037-07-07")] <- NA
-  
-  if (outcome_name %in% c('dementia', 'delirium')){
-    outcome[[date_outcome]] <- as.Date(outcome[[date_outcome]], format = '%Y-%m-%d')
-  } else if (outcome_name %in% c('death')){
-    outcome[[date_outcome]] <- as.Date(outcome[[date_outcome]], format = '%d/%m/%Y')
-  }
-  
-  outcome[[year_outcome]] <- as.numeric(format(as.Date(outcome[[date_outcome]]), "%Y"))
+  # get file with outcome
+  covs <- readRDS('output_files/covariates.Rds')
+  outcome <- covs[, c('id', date_outcome, outcome_name)]
+  outcome[[year_outcome]] <- as.numeric(format(as.Date(outcome[[date_outcome]]), '%Y'))
   
   # sex, age
-  sex_age <- read.csv('age_sex_formatted.csv', sep = '|') %>% 
+  sex_age <- covs %>% 
     select(id, sex, birth_year, birth_date)
   # year first present in prescription sample
-  data_period <- read.csv('data_period_long.csv')
+  data_period <- read.csv('output_files/data_period_long.csv')
   colnames(data_period)[colnames(data_period) == 'eid'] <- 'id'
   year_first <- filter(data_period, year_present !=0) %>% 
     group_by(id) %>% 
@@ -242,8 +224,8 @@ prepare_scales <- function(version, file_name, outcome_name, year_range = c(2000
   df <- merge(df, outcome, by = 'id', all.x = TRUE)
   
   # remove those that don't want to participate in the study anymore
-  opt_outs <- read.csv('participant_opt_out.csv')
-  df <- filter(df, !id %in% opt_outs$X1005679)
+  opt_outs <- read.csv('participant_opt_out.csv', header = FALSE)
+  df <- filter(df, !id %in% opt_outs$V1)
   
   ## choose first year to include for AChB averaging
   # for those for whom sampling started in 2015 or later, choose that year 
@@ -267,8 +249,36 @@ prepare_scales <- function(version, file_name, outcome_name, year_range = c(2000
     group_by(id) %>% summarise(year_achb_last = max(year))
   df <- merge(df, sampling_time, by = 'id')
   df <- merge(df, year_achb_last, by = 'id')
-  # sampling time 2000 - 2005 (remove cases before or during this period)
-  df <- df[(df[[year_outcome]] > stop_year) | (is.na(df[[year_outcome]])) ,]
+  
+  # add inpatient data provider to calculate censoring dates
+  data_provider_inpatient <- covs %>%
+    select(id, data_provider_inpatient_last)
+  df <- merge(df, data_provider_inpatient, by = 'id', all.x = TRUE)
+  
+  # calculate censoring year
+  loss_to_followup <- covs %>% 
+    select(c(id, loss_to_followup, death_date))
+  if (outcome_name == 'death'){
+    df <- merge(df, # if outcome is death, we already have the date
+                subset(loss_to_followup, select = -death_date), 
+                by = 'id', all.x = TRUE)
+    df$censor_date <- pmin(df[[date_outcome]], df$loss_to_followup, na.rm = TRUE)
+  } else{
+    df <- merge(df, loss_to_followup, by = 'id', all.x = TRUE)
+    df$censor_date <- pmin(df[[date_outcome]], df$loss_to_followup, df$death_date, na.rm = TRUE)
+  }
+  # TODO: SET CENSORING DATE FOR NON-EVENTS BASED ON DATA PROVIDER
+  # set the correct censoring date for non-events based on data provider
+  df$censor_date[df$data_provider_inpatient_last == 'HES' & is.na(df$censor_date)] <- 
+    as.Date('31.10.2022', format = '%d.%m.%Y')
+  df$censor_date[df$data_provider_inpatient_last == 'SMR' & is.na(df$censor_date)] <- 
+    as.Date('31.8.2022', format = '%d.%m.%Y')
+  df$censor_date[df$data_provider_inpatient_last == 'PEDW' & is.na(df$censor_date)] <- 
+    as.Date('31.5.2022', format = '%d.%m.%Y')
+  
+  # remove cases lost to follow-up before or during the sampling period)
+  df$censor_year <- as.numeric(format(as.Date(df$censor_date), '%Y'))
+  df <- df[(df$censor_year > stop_year) | (is.na(df$censor_year)) ,]
   # remove NA cases
   df <- df[ !is.na(df[[outcome_name]]), ]
   
@@ -278,24 +288,27 @@ prepare_scales <- function(version, file_name, outcome_name, year_range = c(2000
                                 as.Date(df$birth_date, format = '%Y-%m-%d'), 
                                 units = 'days'))/365.25
   
+  # calculate follow-up
+  df[[paste0('follow_up_', outcome_name)]] <- 
+    as.numeric(difftime(df$censor_date, df$date_achb_last, units = 'days')/365.25)
   
   # add data provider
-  data_provider <- read.csv('meds_de-branded.csv', sep = '|') %>%
+  data_provider <- read.csv('output_files/meds_de-branded.csv', sep = '|') %>%
     select(id, data_provider, date)
   data_provider$date <- as.Date(data_provider$date, format = '%d/%m/%Y')
-  data_provider$year <- as.numeric(format(as.Date(data_provider$date), "%Y"))
+  data_provider$year <- as.numeric(format(as.Date(data_provider$date), '%Y'))
   data_provider <- data_provider %>% 
     group_by(id, year) %>% 
     summarise(data_provider = Mode(data_provider))
   
   
   # import scales, select only relevant prescribing period, and merge AChB scales with pseudoscales
-  meds <- readRDS(paste0('pseudo_scales_', version, '.Rds'))
+  meds <- readRDS(paste0('output_files/pseudo_scales_', version, '.Rds'))
   data.table::setDT(meds) # more efficient as data table
   meds <- meds[year >= start_year & year <= stop_year]
   meds <- as.data.frame(meds) # back to data frame
-  achb <- read.csv('achb_scales.csv', sep = '|')
-  achb_alt <- read.csv('achb_scales_poly.csv', sep = '|')
+  achb <- read.csv('output_files/achb_scales.csv', sep = '|')
+  achb_alt <- read.csv('output_files/achb_scales_poly.csv', sep = '|')
   colnames(achb)[3:ncol(achb)] <- 
     paste('score_', colnames(achb)[3:ncol(achb)], sep='')
   colnames(achb_alt)[3:ncol(achb_alt)] <- 
@@ -347,7 +360,8 @@ prepare_scales <- function(version, file_name, outcome_name, year_range = c(2000
   meds <- meds[, lapply(.SD, sum, na.rm = TRUE), by = id] 
   meds <- data.frame(meds)
   meds <- merge(df[, c('id', 'sex', 'age', 'data_provider', 
-                       'data_provider_imputed', 'sampling_time', outcome_name)], 
+                       'data_provider_imputed', 'sampling_time', outcome_name,
+                       paste0('follow_up_', outcome_name))], 
                 meds, 
                 by = 'id')
   # in cases of multiple years: average across the years
@@ -355,28 +369,9 @@ prepare_scales <- function(version, file_name, outcome_name, year_range = c(2000
     mutate(across(starts_with('score'), ~ . / sampling_time))
   
   # add the covariates
-  cov_dem <- readRDS('covs_demographic.Rds')
-  cov_lif <- readRDS('covs_lifestyle.Rds')
-  cov_soc <- readRDS('covs_social.Rds')
-  cov_bio <- readRDS('covs_biology.Rds')
-  cov_dis <- readRDS('covs_disorders.Rds')
-  
-  meds <- merge(meds, cov_dem %>% select(-sex), by = 'id', all.x = TRUE)
-  meds <- merge(meds, cov_lif, by = 'id', all.x = TRUE)
-  meds <- merge(meds, cov_soc, by = 'id', all.x = TRUE)
-  meds <- merge(meds, cov_bio, by = 'id', all.x = TRUE)
-  # remove potentially duplicate columns before merging with disorders
-  if (outcome_name %in% c('dementia')) {
-    meds <- merge(meds, cov_dis %>% 
-                    select(-dementia, -dementia_date, -death, -death_date), 
-                  by = 'id', all.x = TRUE)
-  } else if (outcome_name %in% c('death')) {
-    meds <- merge(meds, cov_dis %>% 
-                    select(-death, -death_date), by = 'id', all.x = TRUE)
-  } else{
-    meds <- merge(meds, cov_dis, by = 'id', all.x = TRUE)
-  }
-  rm(cov_dem, cov_lif, cov_soc, cov_bio, cov_dis)
+  covs <- covs[, c('id', setdiff(colnames(covs), colnames(meds)))]
+  meds <- merge(meds, covs, by = 'id', all.x = TRUE)
+  rm(covs)
   
   # change first dates of diagnosis to years
   meds$birth_date <- NULL
@@ -406,7 +401,7 @@ prepare_scales <- function(version, file_name, outcome_name, year_range = c(2000
                   as.factor))
   
   # export
-  saveRDS(meds, file = paste0('pseudo_scales_summarised_', version, '_', outcome_name, '.Rds'))
+  saveRDS(meds, file = paste0('output_files/pseudo_scales_summarised_', version, '_', outcome_name, '.Rds'))
   return(meds)
 }
 
