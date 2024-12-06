@@ -267,7 +267,6 @@ prepare_scales <- function(version, outcome_name, year_range = c(2015, 2015)){
     df <- merge(df, loss_to_followup, by = 'id', all.x = TRUE)
     df$censor_date <- pmin(df[[date_outcome]], df$loss_to_followup, df$death_date, na.rm = TRUE)
   }
-  # TODO: SET CENSORING DATE FOR NON-EVENTS BASED ON DATA PROVIDER
   # set the correct censoring date for non-events based on data provider
   df$censor_date[df$data_provider_inpatient_last == 'HES' & is.na(df$censor_date)] <- 
     as.Date('31.10.2022', format = '%d.%m.%Y')
@@ -375,6 +374,7 @@ prepare_scales <- function(version, outcome_name, year_range = c(2015, 2015)){
   
   # change first dates of diagnosis to years
   meds$birth_date <- NULL
+  meds$death_date <- NULL
   meds <- meds %>%
     mutate(across(ends_with('_date'), ~year(as.Date(., format = "%d/%m/%Y")))) %>%
     # if occurrence after end of sampling, change date to NA
