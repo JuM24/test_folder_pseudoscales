@@ -1332,8 +1332,16 @@ covs <- Reduce(function(x, y) merge(x, y, by = 'id', all = TRUE),
                   cancer_prostate, cancer_lung, cancer_breast, cancer_ovary,
                   cancer_prostate_ovary, cns_cancer, cns_any), 
                 ~ replace_na(., 0)))
-# 99 dummy value to NA
-covs[covs == 99] <- NA
+
+# 99 dummy value to NA - just if it's the maximum value because then it 
+# indicates dummy value as opposed to true value
+num_cols <- sapply(covs, is.numeric)
+covs[num_cols] <- lapply(covs[num_cols], function(x) {
+  if (max(x, na.rm = TRUE) == 99) {
+    x[x == 99] <- NA
+  }
+  return(x)
+})
 
 covs$id <- as.character(covs$id)
 
