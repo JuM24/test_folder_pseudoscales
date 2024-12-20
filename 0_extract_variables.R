@@ -16,7 +16,7 @@ library(tidyverse)
 
 ukb <- read.csv(file_name)
 
-# main raw data
+# main raw data 
 main_vars <- ukb %>% 
   select(c(eid, starts_with(
     # demographic, lifestyle, and environmental
@@ -90,4 +90,4 @@ main_vars <- ukb %>%
       # air pollution
       'X24003.', 'X24004.', 'X24006.', 'X24016.', 'X24017.', 'X24018.'
       ))))
-saveRDS(main_vars, file = paste0(output_path, '/main_vars.Rds'))
+saveRDS(main_vars, file = paste0(output_path, '/vars_pseudoscales.Rds'))
