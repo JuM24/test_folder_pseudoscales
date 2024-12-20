@@ -235,7 +235,6 @@ prepare_scales <- function(version, outcome_name, year_range = c(2015, 2015)){
   # for those for whom sampling started before 2015, choose 2015
   df$year_achb_first[df$year_first < start_year] <- start_year
   
-  ## since we'll ideally be averaging over 6 years, we want :
   # subsample with only participants for whom there is data before sampling period 
   # (i.e., remove participants that were first recorded after 2015)
   df <- filter(df, year_first <= stop_year, )
@@ -290,6 +289,18 @@ prepare_scales <- function(version, outcome_name, year_range = c(2015, 2015)){
   # calculate follow-up
   df[[paste0('follow_up_', outcome_name)]] <- 
     as.numeric(difftime(df$censor_date, df$date_achb_last, units = 'days')/365.25)
+  
+  # add additional column for competing events
+  if (outcome_name != 'death'){
+    df$death <- ifelse(!is.na(df$death_date), 1, 0)
+    df$status <- 0
+    df$status[df$dementia == 1] <- 1
+    # those diagnosed with dementia at death still count as dementia cases
+    df$status[df$death == 1] <- 2
+    df$status[df$dementia_date == df$death_date] <- 1
+  } else{
+    df$status <- NA
+  }
   
   # add data provider
   data_provider <- read.csv('output_files/meds_de-branded.csv', sep = '|') %>%
@@ -360,6 +371,7 @@ prepare_scales <- function(version, outcome_name, year_range = c(2015, 2015)){
   meds <- data.frame(meds)
   meds <- merge(df[, c('id', 'sex', 'age', 'data_provider', 
                        'data_provider_imputed', 'sampling_time', outcome_name,
+                       'status',
                        paste0('follow_up_', outcome_name))], 
                 meds, 
                 by = 'id')
@@ -372,20 +384,24 @@ prepare_scales <- function(version, outcome_name, year_range = c(2015, 2015)){
   meds <- merge(meds, covs, by = 'id', all.x = TRUE)
   rm(covs)
   
+  # identify columns to mutate
+  columns_to_mutate <- setdiff(grep('_date$', names(meds), value = TRUE), 
+                               c('birth_date', 'death_date', date_outcome))
   # change first dates of diagnosis to years
-  meds$birth_date <- NULL
-  meds$death_date <- NULL
-  meds <- meds %>%
-    mutate(across(ends_with('_date'), ~year(as.Date(., format = "%d/%m/%Y")))) %>%
-    # if occurrence after end of sampling, change date to NA
-    mutate(across(ends_with("_date"), ~if_else(. > stop_year, NA_real_, .)))
+  meds[columns_to_mutate] <- lapply(meds[columns_to_mutate], function(col) {
+    year(as.Date(col, format = '%d/%m/%Y'))
+  })
+  # if occurrence after end of sampling, change date to NA
+  meds[columns_to_mutate] <- lapply(meds[columns_to_mutate], function(col) {
+    if_else(col > stop_year, NA_real_, col)
+  })
   # if the date of occurrence is NA, change disease coding to 0, 
   # effectively removing cases after end of sampling
-  disease_cols <- str_remove_all(names(meds)[str_detect(names(meds), "_date$")], "_date")
-  disease_cols <- disease_cols[disease_cols != "birth"]
+  disease_cols <- str_remove_all(names(meds)[str_detect(names(meds), '_date$')], '_date')
+  disease_cols <- disease_cols[disease_cols != 'birth']
   meds <- meds %>% 
     mutate(across(all_of(disease_cols), 
-                  ~if_else(is.na(meds[[paste0(cur_column(), "_date")]]), 0, .)))
+                  ~if_else(is.na(meds[[paste0(cur_column(), '_date')]]), 0, .)))
   
   # change some variables to factors
   meds <- meds %>% 
@@ -395,7 +411,7 @@ prepare_scales <- function(version, outcome_name, year_range = c(2015, 2015)){
                     vision_problem, sleep_dis_any, endocrine_dis, nutr_dis, 
                     metabolic_dis, cerebrovascular, respiratory, hepatic, flu, 
                     heart, dementia, delirium, cancer_colon, cancer_prostate_ovary, 
-                    cancer_lung, cancer_breast, cancer_ovary,
+                    cancer_lung, cancer_breast, cancer_ovary, status,
                     starts_with(c('data_prov', 'education', 'alc_freq', 'smoking', 
                                   'phys_act', 'depressed', 'lonely', 'soc_isol'))), 
                   as.factor))
@@ -414,60 +430,64 @@ prepare_scales <- function(version, outcome_name, year_range = c(2015, 2015)){
 ###  Calculate the RR, the OR, and the CIs for logistic models predicting binary outcomes with medication burden and the inclusion of covariates
 
 ## Takes as inputs:
-#   - `type`: the type of simulation/sampling ('across_all', 'across_achb', 'within_all', 'within_achb')
+#   - `version`: the type of simulation/sampling ('across_all', 'across_achb', 
+#     'within_all', 'within_achb')
 #   - `outcome_name`: 'death', 'dementia', or 'delirium'
-#   - `control`: 'basic' vs. 'full' adjustment (i.e., only sex and age or all covariates)
-#   - `smote`: whether SMOTE should be run to adjust group imbalance
-#   - `other_predictors`: whether the effects of other predictors should be included in the output (WORKS ONLY for continuous or binary categorical predictors)
+#   - `control`: 'basic' (i.e., none) vs. 'full' adjustment
+#   - `smote`: whether SMOTE should be run to adjust group imbalance;
+#     WARNING: implemented only for logistic regression
+#   - `model_type`: 'logistic' vs. 'survival'
+#   - `competing_death`: TRUE or FALSE; whether subdistribution hazard for the 
+#     competing event of death should also be calculated 
+#   - `other_predictors`: list of column names; whether the effects of other 
+#     variables should be included in the output;
+#     WARNING: implemented only for numerical or binary variables in logistic regression
+#   - `file_path`: the path to the folder where the 'pseudo_scales_summarised'
+#     file with the medication burden according to each scale is saved
 #   - `output_file_name`: complete path and file name of the output which will be saved to disk
-#   - `core_number`: the number of cores to dedicate to the loop; all available cores are included by default
+#   - `core_number`: the number of cores to dedicate to the computation
 
 ## Returns as output:
 #   - a data frame with the effect sizes for each medication burden scale, the sample sizes, and the number of drugs included in the scales
 #   - also saves the output to the current directory
 
-
-
-
-outcome_effect_parallel <- 
-  function(version, outcome_name, control = 'full', smote = TRUE, 
-           other_predictors = c(), file_path = file_path, output_file_name, 
-           core_number = parallel::detectCores() - 1){
+outcome_effect_parallel <- function(version, 
+                                    outcome_name, 
+                                    control = 'full', 
+                                    smote = FALSE,
+                                    model_type = 'logistic',
+                                    competing_death = FALSE,
+                                    other_predictors = c(''),
+                                    file_path = getwd(), 
+                                    output_file_name,
+                                    core_number = round(0.8*parallel::detectCores())){
+  
+  
+  # error messages for combinations of arguments that have not been implemented
+  if (smote == TRUE & model_type == 'survival') {
+    stop('Function not implemented to perform SMOTE for time-to-event modelling.
+           Please run logistic model or disable SMOTE.')
+  }
+  
+  if (other_predictors != '' & model_type == 'survival') {
+    stop('Function not implemented to estimate time-to-event for multiple variables.
+           Please run logistic model or leave `other_predictors` at default value.')
+  }
+  
   
   library(tidyverse)
   library(caret)
   
-  scales <- readRDS(file = file_path)
-  
-  # change names and positions of some variables to that code below works well
-  scales <- scales %>% 
-    rename(drug_number_unique = score_drug_number_unique, drug_number = score_drug_number) %>% 
-    relocate(drug_number_unique, .before = sampling_time)
-  
-  # remove Scottish records for dementia
-  #  if (outcome_name == 'dementia'){
-  scales$data_provider_imputed <- as.character(scales$data_provider_imputed)
-  scales <- filter(scales, data_provider_imputed != '2')
-  scales$data_provider_imputed <- as.factor(scales$data_provider_imputed)
-  #  }
-  
-  # these columns are the predictors
-  cols_relevant_0 <- grep("score_", colnames(scales))
-  cols_relevant_1 <- grep("_alt", colnames(scales), invert = TRUE)
-  cols_relevant <- intersect(cols_relevant_0, cols_relevant_1)
-  
-  # outcome to factor
-  scales[[outcome_name]] <- as.factor(scales[[outcome_name]])
-  
-  # outliers to NAs
-  scales <- scales %>% 
-    mutate(across(starts_with('score_'), ~outliers(.x, var_metric = 4, method = 'SD')))
+  scales <- readRDS(file = paste0(file_path, '/output_files/pseudo_scales_summarised_', version, '_', outcome_name, '.Rds'))
   
   
-  # normalize all numerical variables except outcome
-  numeric_columns <- sapply(scales, is.numeric)
-  numeric_columns[which(colnames(scales) == outcome_name)] <- FALSE
-  scales[numeric_columns] <- lapply(scales[numeric_columns], function(x) as.vector(scale(x)))
+  # clean the data for analysis
+  output <- prep_for_analysis(df = scales, 
+                              model_type = model_type, 
+                              outcome_name = outcome_name)
+  scales <- output[[1]]
+  cols_relevant <- output[[2]]
+  rm(output); gc()    
   
   # initialise vector with scale names
   scale_names <- colnames(scales[cols_relevant])
@@ -483,186 +503,296 @@ outcome_effect_parallel <-
   outcome <- foreach(i = seq_along(cols_relevant), 
                      .combine = 'rbind', 
                      .packages = c('tidyverse', 'caret', 'marginaleffects', 'smotefamily')) %dopar% {
-    
-    scale_name <- scale_names[i]
-    
-    poly_0 <- paste0(scale_names[i], '_alt') # non-scale polypharmacy
-    covs_basic <- c('sex', 'age', 'data_provider_imputed')
-    if (outcome_name == 'death'){
-      covs_compl <- c('sex', 'age', 'data_provider_imputed', 'education_0', 'deprivation', 
-                      'alc_freq_0', 'waist_0', 'smoking_0', 'phys_act_0', 'diabetes', 
-                      'cerebrovascular', 'respiratory', 'hepatic', 'flu', 'heart', 'cancer_colon', 
-                      'cancer_prostate_ovary', 'cancer_lung', 'cancer_breast', poly_0)
-    } else if (outcome_name == 'dementia'){
-      covs_compl <- c('sex', 'age', 'data_provider_imputed', 'education_0', 'deprivation', 
-                      'g_0', 'pollution_pc', 'alc_freq_0', 'waist_0', 'smoking_0', 
-                      'phys_act_0', 'mood_dis', 'diabetes', 'hyperlip', 'hear_loss_any', 
-                      'cns_infl', 'cns_atroph', 'cns_mov', 'cns_demyel', 'cns_parox', 
-                      'cns_other', 'cns_cancer', 'cns_tbi', 'hypertension', 'heart', 
-                      'soc_isol_0', 'cerebrovascular', 'lonely_0', 'depressed_0', poly_0)
-    } else if (outcome_name == 'delirium'){
-      covs_compl <- c('sex', 'age', 'data_provider_imputed', 'education_0', 'deprivation', 
-                      'g_0', 'alc_freq_0', 'waist_0', 'smoking_0', 'phys_act_0', 
-                      'mood_dis', 'psych_dis',  'sleep_dis_any', 'vision_problem', 
-                      'hear_loss_any', 'cns_any', 'endocrine_dis', 'nutr_dis', 
-                      'metabolic_dis', 'cerebrovascular', 'soc_isol_0', 'lonely_0', poly_0)
-    }
-    
-    
-    predictor_var <- colnames(scales[cols_relevant[i]])
+                       
+                       
+                       source('helper_functions.R')
+                       
+                       
+                       scale_name <- scale_names[i]
+                       
+                       poly_0 <- paste0(scale_names[i], '_alt') # non-scale polypharmacy
+                       if (outcome_name == 'death'){
+                         covs_compl <- c('sex', 'age', 'data_provider_imputed', 'education_0', 'deprivation', 
+                                         'alc_freq_0', 'waist_0', 'smoking_0', 'phys_act_0', 'diabetes', 
+                                         'cerebrovascular', 'respiratory', 'hepatic', 'flu', 'heart', 'cancer_colon', 
+                                         'cancer_prostate_ovary', 'cancer_lung', 'cancer_breast', poly_0)
+                       } else if (outcome_name == 'dementia'){
+                         covs_compl <- c('sex', 'age', 'data_provider_imputed', 'education_0', 'deprivation', 
+                                         'g_0', 'pollution_pc', 'alc_freq_0', 'waist_0', 'smoking_0', 
+                                         'phys_act_0', 'mood_dis', 'diabetes', 'hyperlip', 'hear_loss_any', 
+                                         'cns_infl', 'cns_atroph', 'cns_mov', 'cns_demyel', 'cns_parox', 
+                                         'cns_other', 'cns_cancer', 'cns_tbi', 'hypertension', 'heart', 
+                                         'soc_isol_0', 'cerebrovascular', 'lonely_0', 'depressed_0', poly_0)
+                       } else if (outcome_name == 'delirium'){
+                         covs_compl <- c('sex', 'age', 'data_provider_imputed', 'education_0', 'deprivation', 
+                                         'g_0', 'alc_freq_0', 'waist_0', 'smoking_0', 'phys_act_0', 
+                                         'mood_dis', 'psych_dis',  'sleep_dis_any', 'vision_problem', 
+                                         'hear_loss_any', 'cns_any', 'endocrine_dis', 'nutr_dis', 
+                                         'metabolic_dis', 'cerebrovascular', 'soc_isol_0', 'lonely_0', poly_0)
+                       }
+                       
+                       
+                       predictor_var <- colnames(scales[cols_relevant[i]])
+                       
+                       # temporary file used to remove observations with missing data
+                       temp <- scales[, c('id', outcome_name, predictor_var, covs_compl,
+                                          'follow_up', 'status')]
+                       
+                       # file with the desired covariates and the scale that is to be assessed
+                       if (control == 'basic'){
+                         scale_df <- scales[, c('id', outcome_name, predictor_var)] 
+                       } else if (control == 'full'){
+                         scale_df <- scales[, c('id', outcome_name, predictor_var, covs_compl)]
+                       }
+                       
+                       # just keep non-missing rows
+                       temp <- temp[complete.cases(temp), ]
+                       scale_df <- filter(scale_df, id %in% temp$id)
+                       temp$id <- NULL; scale_df$id <- NULL
+                       
+                       # get all variable names in the dataframe excluding the outcome variable
+                       predictor_names <- setdiff(names(scale_df), c(outcome_name, predictor_var))
+                       # collapse into a single string with variables separated by "+"
+                       predictor_str <- paste(predictor_names, collapse = ' + ')
+                       
+                       
+                       
+                       
+                       # run models
+                       model <- run_models(df = temp, 
+                                           model_type = model_type, 
+                                           exposure = predictor_var, 
+                                           covariates = predictor_str,
+                                           outcome_name = outcome_name,
+                                           control = control,
+                                           competing_death = competing_death)
+                       model_output <- model[[1]]
+                       estimates <- model[[2]]
+                       
+                       
+                       
+                       # potentially apply SMOTE
+                       if (smote == TRUE){
+                         scale_df_smote <- smote_df(df = temp, 
+                                                    outcome_name = outcome_name)
+                         
+                         
+                         
+                         
+                         # remove variables used for SMOTE if the control is basic
+                         if (control == 'basic'){
+                           scale_df_smote <- scale_df_smote[, c(outcome_name, predictor_var)] 
+                         } else if (control == 'full'){
+                           scale_df_smote <- scale_df_smote[, c(outcome_name, predictor_var, covs_compl)]
+                         }
+                         
+                         
+                         
+                         
+                         # run models with SMOTE data
+                         model_smote <- run_models(df = scale_df_smote,
+                                                   model_type = model_type, 
+                                                   exposure = predictor_var, 
+                                                   covariates = predictor_str,
+                                                   outcome_name = outcome_name,
+                                                   control = control,
+                                                   competing_death = competing_death)
+                         model_output_smote <- model_smote[[1]]
+                         estimates_smote <- model_smote[[2]]
+                         
+                         
+                         
+                       } else if (smote == FALSE) {
+                         # if SMOTE is FALSE, set the results to the values
+                         # of the non-SMOTE analysis
+                         scale_df_smote <- scale_df[]
+                         model_output_smote <- model_output
+                         estimates_smote <- estimates
+                       }
+                       
+                       # extract effect sizes and create temporary data frame
+                       all_outcomes <- create_temp_df(model_type = model_type,
+                                                      other_predictors = other_predictors,
+                                                      model_output = model_output,
+                                                      model_output_smote = model_output_smote,
+                                                      estimates = estimates,
+                                                      estimates_smote = estimates_smote,
+                                                      predictor_var = predictor_var,
+                                                      scale_name = scale_name,
+                                                      scale_df = scale_df,
+                                                      scale_df_smote = scale_df_smote)
+                       
+                       return(list(all_outcomes, estimates))
+                     }
+  
+  # shut down all workers
+  stopImplicitCluster()
+  
+  # extract the two objects
+  all_outcomes <- outcome[, 1] %>%
+    bind_rows(.)
+  
+  if (model_type == 'logistic'){
+    rm(outcome)
+  } else if (model_type == 'survival'){
+    survival_data <- outcome[, 2]
+  }
+  
+  # remove nonsensical columns for SMOTE if SMOTE not run
+  if (smote == FALSE){
+    all_outcomes <- all_outcomes %>% 
+      select(-ends_with('_smote'))
+  }
+  
+  # same for other predictors
+  if (other_predictors == '' & model_type == 'logistic'){
+    all_outcomes <- all_outcomes %>% 
+      select(-X_OR)
+  }
+  
+  
+  # same for competing risk estimates
+  if (model_type == 'survival' & competing_death == FALSE){
+    all_outcomes <- all_outcomes %>% 
+      select(-starts_with('HR_comp'))
+  }
+  
+  # add the numbers of drugs included in the scales
+  if (version == 'across_all' | version == 'across_achb'){
+    version_abr <- 'across'
+  } else if (version == 'within_all' | version == 'within_achb'){
+    version_abr <- 'within'
+  }
+  
+  scale_length <- read.csv(paste0('output_files/pseudo_scale_size_', version_abr, '.csv'))
+  scale_length$type <- 'pseudo'
+  scale_length_achb <- read.csv('output_files/scale_size.csv')
+  scale_length_achb$type <- 'achb'
+  scale_length_achb$scale_name <- paste0('score_', scale_length_achb$scale_name)
+  scale_length <- rbind(scale_length_achb, scale_length)
+  all_outcomes <- merge(scale_length, all_outcomes, by = 'scale_name')
+  # if survival modelling, also output the data needed for curve construction
+  if (model_type == 'survival'){
+    saveRDS(all_outcomes, file = paste0('output_files/', output_file_name))
+    saveRDS(survival_data, file = paste0('output_files/', output_file_name,
+                                         '_survival_data.Rds'))
+    return(list(all_outcomes, survival_data))
+  } else{
+    saveRDS(all_outcomes, file = output_file_name)
+    return(all_outcomes)
+  }
+}
 
-    # temporary file used to remove observations with missing data
-    temp <- scales[, c('id', outcome_name, predictor_var, covs_compl)]
+
+
+
+
+
+
+# preparation for analysis: removal of outliers, scaling, etc.
+prep_for_analysis <- function(df, 
+                              model_type, 
+                              outcome_name){
+
+  # change names and positions of some variables to that code below works well
+  df <- df %>% 
+    rename(drug_number_unique = score_drug_number_unique, drug_number = score_drug_number) %>% 
+    relocate(drug_number_unique, .before = sampling_time)
+  
+  # remove Scottish records for dementia (due to lack of pollution data)
+  if (outcome_name == 'dementia'){
+    df$data_provider_imputed <- as.character(df$data_provider_imputed)
+    df <- filter(df, data_provider_imputed != '2')
+    df$data_provider_imputed <- as.factor(df$data_provider_imputed)
+  }
+  
+  # these columns are the predictors
+  cols_relevant_0 <- grep('score_', colnames(df))
+  cols_relevant_1 <- grep('_alt', colnames(df), invert = TRUE)
+  cols_relevant <- intersect(cols_relevant_0, cols_relevant_1)
+  
+  # potentially outcome to factor
+  if (model_type == 'logistic'){
+    df[[outcome_name]] <- as.factor(df[[outcome_name]])
+  } else if(model_type == 'survival'){
+    df[[outcome_name]] <- as.numeric(df[[outcome_name]])
+  }
+  # outliers to NAs
+  df <- df %>% 
+    mutate(across(starts_with('score_'), ~ outliers(.x, var_metric = 4, method = 'SD')))
+  
+  # normalise all numerical variables except outcome
+  numeric_columns <- sapply(df, is.numeric)
+  numeric_columns[which(colnames(df) %in% c(outcome_name, 
+                                            paste0('follow_up_', outcome_name)))] <- FALSE
+  df[numeric_columns] <- lapply(df[numeric_columns], function(x) as.vector(scale(x)))
+  
+  # set follow-up variable to follow-up value of appropriate outcome
+  df$follow_up <- df[[paste0('follow_up_', outcome_name)]]
+  
+  return(list(df, cols_relevant))
+}
+
+
+
+
+# create temporary data frame for each parallel worker
+create_temp_df <- function(model_type, 
+                           other_predictors,
+                           model_output, 
+                           model_output_smote,
+                           estimates, 
+                           estimates_smote, 
+                           predictor_var,
+                           scale_name, 
+                           scale_df, 
+                           scale_df_smote){
+  
+  if (model_type == 'logistic'){
     
-    # file with the desired covariates and the scale that is to be assessed
-    if (control == 'basic'){
-      scale_df <- scales[, c('id', outcome_name, predictor_var, covs_basic)] 
-    } else if (control == 'full'){
-      scale_df <- scales[, c('id', outcome_name, predictor_var, covs_compl)]
-    }
+    coefs_model <- model_output$coefficients
+    RR <- estimates[['estimate']]
+    OR <- exp(coefs_model[predictor_var, 'Estimate'])
+    OR_SE <- coefs_model[predictor_var, 'Std. Error']
     
-    # just keep non-missing rows
-    temp <- temp[complete.cases(temp), ]
-    scale_df <- filter(scale_df, id %in% temp$id)
-    temp$id <- NULL; scale_df$id <- NULL
+    coefs_model_smote <- model_output_smote$coefficients
+    RR_smote <- estimates_smote[['estimate']]
+    OR_smote <- exp(coefs_model_smote[predictor_var, 'Estimate'])
+    OR_SE_smote <- coefs_model_smote[predictor_var, 'Std. Error']
     
-    # get all variable names in the dataframe excluding the outcome variable
-    predictor_names <- setdiff(names(scale_df), c(outcome_name, predictor_var))
-    # collapse into a single string with variables separated by "+"
-    predictor_str <- paste(predictor_names, collapse = " + ")
-    # formula for the models
-    formula <- as.formula(paste0(outcome_name, " ~ ", predictor_var, '+', predictor_str))
-    
-    # apply model
-    model <- glm(formula, data = scale_df, family = 'binomial')
-    estimates_RR <- marginaleffects::avg_comparisons(model,
-                                                     variables = c(predictor_var),
-                                                     vcov = FALSE,
-                                                     comparison = "lnratioavg",
-                                                     transform = "exp")
-    model <- summary(model)
-    
-    # potentially apply SMOTE
-    if (smote == TRUE){
-      df_new <- temp[]
-      # calculate the necessary factor by which to multiply cases 
-      # to reach the same number as non-cases
-      dup_size <- floor((sum(df_new[[outcome_name]] == '0') / 
-                           sum(df_new[[outcome_name]] == '1'))/3)
-      # determine ordinal variables (as opposed to nominal) - required for KNN
-      ordinals <- c('alc_freq_0', 'phys_act_0', 'depressed_0', 'lonely_0', 'sol_isol_0')
-      ordinals <- ordinals[ordinals %in% names(df_new)] 
-      # ordinal variables to numeric (required for KNN)
-      df_new[ordinals] <- lapply(df_new[ordinals], as.numeric)
-      # one-hot encoding for nominal variables
-      dmy <- dummyVars(" ~ .", data = df_new[, -which(names(df_new) == outcome_name)])
-      X <- data.frame(predict(dmy, newdata = df_new[, -which(names(df_new) == outcome_name)]))
-      target <- df_new[[outcome_name]]
-      # apply SMOTE
-      data_smote <- smotefamily::SMOTE(X = X, target = target, K = 5, dup_size = dup_size)
-      # create new data frame
-      scale_df_smote <- data_smote$data
-      # remove potential dots inserted into the column names
-      colnames(scale_df_smote) <- gsub('\\.', '', colnames(scale_df_smote))
-      # first, select the new one-hot encoded variables and round them (because some values are now between 0 and 1)
-      categ_vars <- colnames(scale_df_smote %>% 
-                               select_if((is.numeric)))
-      categ_vars <- categ_vars[!categ_vars %in% colnames(df_new)]
-      scale_df_smote <- scale_df_smote %>% 
-        mutate(across(starts_with(c(categ_vars, ordinals)), round)) %>%
-        mutate(across(starts_with(c(categ_vars, ordinals)), as.factor))
-      # second, reverse the hot-one encoding
-      # data provider is present everywhere, so we can hard-code it
-      scale_df_smote$data_provider_imputed <- '0'
-      scale_df_smote$data_provider_imputed[scale_df_smote$data_provider_imputed1 == 1] <- '1'
-      scale_df_smote$data_provider_imputed[scale_df_smote$data_provider_imputed2 == 1] <- '2'
-      scale_df_smote$data_provider_imputed[scale_df_smote$data_provider_imputed3 == 1] <- '3'
-      scale_df_smote$data_provider_imputed[scale_df_smote$data_provider_imputed4 == 1] <- '4'
-      categ_vars <- categ_vars[categ_vars != 'data_provider_imputed0' & 
-                                 categ_vars != 'data_provider_imputed1' & 
-                                 categ_vars != 'data_provider_imputed2' &
-                                 categ_vars != 'data_provider_imputed3' & 
-                                 categ_vars != 'data_provider_imputed4']
-      # for the binary variables, we need to undo one-hot encoding
-      for (old_col in categ_vars){
-        new_col <- stringr::str_sub(old_col, end = -2) # remove last character
-        scale_df_smote[[new_col]] <- '0'
-        scale_df_smote[[new_col]][scale_df_smote[[old_col]] == 1] <- '1'
-        scale_df_smote[[old_col]] <- NULL
-      }
-      scale_df_smote <- subset(scale_df_smote, 
-                               select = -c(data_provider_imputed0, 
-                                           data_provider_imputed1, 
-                                           data_provider_imputed3, 
-                                           data_provider_imputed4))
-      # rename back outcome variable
-      colnames(scale_df_smote)[colnames(scale_df_smote) == 'class'] <- outcome_name
-      scale_df_smote[[outcome_name]] <- as.factor(scale_df_smote[[outcome_name]])
-      scale_df_smote <- scale_df_smote %>% 
-        mutate_if(is.character, as.factor)
-      
-      # remove variables used for SMOTE if the control is basic
-      if (control == 'basic'){
-        scale_df_smote <- scale_df_smote[, c(outcome_name, predictor_var, covs_basic)] 
-      } else if (control == 'full'){
-        scale_df_smote <- scale_df_smote[, c(outcome_name, predictor_var, covs_compl)]
-      }
-      
-      # run the model with SMOTE      
-      model_smote <- glm(formula, data = scale_df_smote, family = 'binomial')
-      estimates_RR_smote <- marginaleffects::avg_comparisons(model_smote,
-                                                             variables = c(predictor_var),
-                                                             vcov = FALSE,
-                                                             comparison = "lnratioavg",
-                                                             transform = "exp")
-      model_smote <- summary(model_smote)
-      
-    } else{
-      scale_df_smote <- scale_df[]
-      model_smote <- model
-      estimates_RR_smote <- estimates_RR
-    }
-    
-    
-    tryCatch(
-      {
-        coefs_model <- model$coef
-        RR <- estimates_RR[[3]]
-        OR <- exp(coefs_model[2,1])
-        OR_SE <- coefs_model[2,2]
+    other_predictor_results <- setNames(vector('list', 
+                                               length(other_predictors)), 
+                                        paste0(other_predictors, '_OR'))
+    # compute values for other_predictors
+    # WARNING: works only for binary or continuous predictors
+    if (other_predictors != ''){
+      for (predictor in other_predictors){
+        predictor_names <- names(coefs_model[, 1])
+        name_index <- which(grepl(paste0('^', predictor), predictor_names))
+        other_predictor_results[[paste0(predictor, '_OR')]] <- 
+          exp(coefs_model[name_index, 1])
         
-        coefs_model_smote <- model_smote$coef
-        RR_smote <- estimates_RR_smote[[3]]
-        OR_smote <- exp(coefs_model_smote[2,1])
-        OR_SE_smote <- coefs_model_smote[2,2]
-        
-        # works only for binary or continuous predictors
-        other_predictor_results <- setNames(vector('list', 
-                                                   length(other_predictors)), 
-                                            paste0(other_predictors, '_OR'))
-        # compute values for other_predictors
-        if (length(other_predictors) != 0){
-          for (predictor in other_predictors){
-            predictor_names <- names(coefs_model[, 1])
-            name_index <- which(grepl(paste0('^', predictor), predictor_names))
-            other_predictor_results[[paste0(predictor, '_OR')]] <- 
-              exp(coefs_model[name_index, 1])
-            
-            if (smote == TRUE){
-              other_predictor_results[[paste0(predictor, '_OR_smote')]] <- 
-                exp(coefs_model_smote[name_index, 1])
-            }
-          }
+        if (smote == TRUE){
+          other_predictor_results[[paste0(predictor, '_OR_smote')]] <- 
+            exp(coefs_model_smote[name_index, 1])
         }
-        
-        
-      },
-      error=function(e) {
-        message('An error occurred.')
-        print(e)
-      }
-    )
+      } 
+    } else{
+      other_predictor_results$`_OR` <- NA
+    }          
+  } else if (model_type == 'survival'){
+    HR <- model_output[predictor_var, 'exp(coef)']
+    HR_SE <- model_output[predictor_var, 'se(coef)']
+    HR_comp <- model_output[predictor_var, 'HR_comp']
+    HR_comp_low <- model_output[predictor_var, 'HR_comp_low']
+    HR_comp_high <- model_output[predictor_var, 'HR_comp_high']
     
+    HR_smote <- model_output_smote[predictor_var, 'exp(coef)']
+    HR_SE_smote <- model_output_smote[predictor_var, 'se(coef)']
+  }
+  
+  
+  if (model_type == 'logistic'){
     # data frame of estimates of other predictors
     other_predictor_df <- as.data.frame(other_predictor_results)
     
@@ -679,37 +809,197 @@ outcome_effect_parallel <-
       n_id_smote = nrow(scale_df_smote)
     )
     
+    
     # combined data frame across workers
     combined_outcome <- cbind(temp_outcome, other_predictor_df)
     
-    return(combined_outcome)
+  } else if (model_type == 'survival'){
+    combined_outcome <- data.frame(
+      scale_name = scale_name,
+      HR = HR,
+      HR_SE = HR_SE,
+      HR_comp = HR_comp,
+      HR_comp_low = HR_comp_low,
+      HR_comp_high = HR_comp_high,
+      n_id = nrow(scale_df),
+      HR_smote = HR_smote,
+      HR_SE_smote = HR_SE_smote,
+      n_id_smote = nrow(scale_df_smote)
+    )
+  }
+  return(combined_outcome)
+}
+
+
+
+
+
+
+# run SMOTE
+smote_df <- function(df, 
+                     outcome_name){
+  
+  # remove variables used for survival modelling
+  df_new <- df %>% 
+    select(-c(follow_up, status))
+  # calculate the necessary factor by which to multiply cases 
+  # to reach the same number as non-cases
+  dup_size <- floor((sum(df_new[[outcome_name]] == '0') / 
+                       sum(df_new[[outcome_name]] == '1'))/3)
+  # determine ordinal variables (as opposed to nominal) - required for KNN
+  ordinals <- c('alc_freq_0', 'phys_act_0', 'depressed_0', 'lonely_0', 'sol_isol_0')
+  ordinals <- ordinals[ordinals %in% names(df_new)] 
+  # ordinal variables to numeric (required for KNN)
+  df_new[ordinals] <- lapply(df_new[ordinals], as.numeric)
+  # one-hot encoding for nominal variables
+  dmy <- dummyVars(" ~ .", data = df_new[, -which(names(df_new) == outcome_name)])
+  X <- data.frame(predict(dmy, newdata = df_new[, -which(names(df_new) == outcome_name)]))
+  target <- df_new[[outcome_name]]
+  # apply SMOTE
+  data_smote <- smotefamily::SMOTE(X = X, target = target, K = 5, dup_size = dup_size)
+  # create new data frame
+  df_smote <- data_smote$data
+  # remove potential dots inserted into the column names
+  colnames(df_smote) <- gsub('\\.', '', colnames(df_smote))
+  # first, select the new one-hot encoded variables and round them (because some values are now between 0 and 1)
+  categ_vars <- colnames(df_smote %>% 
+                           select_if((is.numeric)))
+  categ_vars <- categ_vars[!categ_vars %in% colnames(df_new)]
+  df_smote <- df_smote %>% 
+    mutate(across(starts_with(c(categ_vars, ordinals)), round)) %>%
+    mutate(across(starts_with(c(categ_vars, ordinals)), as.factor))
+  # second, reverse the hot-one encoding
+  # data provider is present everywhere, so we can hard-code it
+  df_smote$data_provider_imputed <- '0'
+  df_smote$data_provider_imputed[df_smote$data_provider_imputed1 == 1] <- '1'
+  df_smote$data_provider_imputed[df_smote$data_provider_imputed2 == 1] <- '2'
+  df_smote$data_provider_imputed[df_smote$data_provider_imputed3 == 1] <- '3'
+  df_smote$data_provider_imputed[df_smote$data_provider_imputed4 == 1] <- '4'
+  categ_vars <- categ_vars[categ_vars != 'data_provider_imputed0' & 
+                             categ_vars != 'data_provider_imputed1' & 
+                             categ_vars != 'data_provider_imputed2' &
+                             categ_vars != 'data_provider_imputed3' & 
+                             categ_vars != 'data_provider_imputed4']
+  
+  # for the binary variables, we need to undo one-hot encoding
+  for (old_col in categ_vars){
+    new_col <- stringr::str_sub(old_col, end = -2) # remove last character
+    df_smote[[new_col]] <- '0'
+    df_smote[[new_col]][df_smote[[old_col]] == 1] <- '1'
+    df_smote[[old_col]] <- NULL
+  }
+  df_smote <- subset(df_smote, 
+                     select = -c(data_provider_imputed0, 
+                                 data_provider_imputed1, 
+                                 data_provider_imputed3, 
+                                 data_provider_imputed4))
+  # rename back outcome variable
+  colnames(df_smote)[colnames(df_smote) == 'class'] <- outcome_name
+  df_smote[[outcome_name]] <- as.factor(df_smote[[outcome_name]])
+  df_smote <- df_smote %>% 
+    mutate_if(is.character, as.factor)
+  
+  return(df_smote)
+}
+
+
+
+
+
+
+
+# function to run logistic/survival models and save the estimates
+run_models <- function(df, 
+                       model_type, 
+                       exposure, 
+                       covariates, 
+                       outcome_name, 
+                       control,
+                       competing_death){
+  
+  if (control == 'full'){
+    covariates_plus <- paste0(' + ', covariates)
+  } else if (control == 'basic'){
+    covariates_plus <- covariates
   }
   
-  # shut down all workers
-  stopImplicitCluster()
-  
-  # remove nonsensical columns for SMOTE if SMOTE not run
-  if (smote == FALSE){
-    outcome <- outcome %>% 
-      select(-ends_with('_smote'))
+  if (model_type == 'logistic'){
+    # formula for the models
+    formula <- as.formula(paste0(outcome_name, ' ~ ', exposure, covariates_plus))
+    
+    # apply model
+    model <- glm(formula, data = df, family = 'binomial')
+    estimates <- marginaleffects::avg_comparisons(model,
+                                                  variables = c(exposure),
+                                                  vcov = FALSE,
+                                                  comparison = 'lnratioavg',
+                                                  transform = 'exp')
+    model_summary <- summary(model)
+    # for Cox regression
+  } else if (model_type == 'survival'){
+    # dichotomise for the creation of survival curve
+    low_cutoff <- quantile(df[[exposure]], 0.25)
+    high_cutoff <- quantile(df[[exposure]], 0.75)
+    lowest_25 <- df[df[[exposure]] <= low_cutoff, ]
+    lowest_25$exposure_binary <- 'low'
+    highest_25 <- df[df[[exposure]] > high_cutoff, ]
+    highest_25$exposure_binary <- 'high'
+    df_dich <- rbind(lowest_25, highest_25)
+    df_dich$exposure_binary <- as.factor(df_dich$exposure_binary)
+    
+    # basic formula to create survival curve
+    formula_simple <- as.formula(paste0('survival::Surv(follow_up,',
+                                        outcome_name, ')',
+                                        ' ~ exposure_binary'))
+    if (control == 'full'){
+      # if we are adjusting for covariates, we need weights to later 
+      # create adjusted survival curves
+      formula_matching <-  as.formula(paste0('exposure_binary ~ ', 
+                                             covariates))
+      df_matched <- MatchIt::matchit(formula_matching, 
+                                     data = df_dich,
+                                     method = 'quick',
+                                     distance = 'glm')
+      # formula to create the survival object
+      formula = as.formula(paste0('survival::Surv(follow_up,',
+                                  outcome_name, ')',
+                                  ' ~ ', exposure, 
+                                  covariates_plus))
+      estimates <- broom::tidy(survival::survfit(formula_simple, 
+                                                 data = df_dich,
+                                                 weights = df_matched$weights))
+    } else if (control == 'basic'){
+      formula <- as.formula(paste0('survival::Surv(follow_up,',
+                                   outcome_name, ')',
+                                   ' ~ ',
+                                   exposure))
+      estimates <- broom::tidy(survival::survfit(formula_simple, 
+                                                 data = df_dich))
+    }
+    # run Cox model
+    model <- survival::coxph(formula, data = df)
+    
+    # complementary log-log transformation to later pool survival curves
+    estimates <- estimates %>%
+      mutate(cloglog = log(-log(1-estimate)))
+    estimates$scale_name <- exposure
+    model_summary <- summary(model)
+    # calculate subdistribution hazard, accounting for competing risk of death
+    if (outcome_name != 'death' & competing_death == TRUE){
+      crr_formula <- as.formula(paste0('survival::Surv(follow_up, status) ~ ',
+                                       exposure, covariates_plus))
+      comp_model <- tidycmprsk::crr(crr_formula, data = df)
+      HR_comp <- exp(comp_model$tidy$estimate)
+      HR_comp_low <- exp(comp_model$tidy$estimate - comp_model$tidy$std.error*1.97)
+      HR_comp_high <- exp(comp_model$tidy$estimate + comp_model$tidy$std.error*1.97)
+      # create output exception for death
+    } else {
+      HR_comp <- NA
+      HR_comp_low <- NA
+      HR_comp_high <- NA
+    }
+    model_summary <- cbind(model_summary$coefficients, 
+                           HR_comp, HR_comp_low, HR_comp_high)
   }
-  
-  
-  
-  # add the numbers of drugs included in the scales
-  if (version == 'across_all' | version == 'across_achb'){
-    version_abr <- 'across'
-  } else if (version == 'within_all' | version == 'within_achb'){
-    version_abr <- 'within'
-  }
-  
-  scale_length <- read.csv(paste0('pseudo_scale_size_', version_abr, '.csv'))
-  scale_length$type <- 'pseudo'
-  scale_length_achb <- read.csv('scale_size.csv')
-  scale_length_achb$type <- 'achb'
-  scale_length_achb$scale_name <- paste0('score_', scale_length_achb$scale_name)
-  scale_length <- rbind(scale_length_achb, scale_length)
-  outcome <- merge(scale_length, outcome, by = 'scale_name')
-  saveRDS(outcome, file = output_file_name)
-  return(outcome)
+  return(list(model_summary, estimates))
 }
