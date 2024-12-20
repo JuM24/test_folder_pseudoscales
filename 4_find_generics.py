@@ -210,6 +210,6 @@ meds.loc[meds['prescription'].str.contains("(?:^|[^a-z])" + 'tab' + \
                                            "(?:$|[^a-z])"), 'application'] = 0
 print('Administration routes after additional search for relevant terms: ')
 print(meds['application'].value_counts())
-meds.to_csv('meds_de_branded.csv', index=False, header=True, sep = '|')
+meds.to_csv('output_files/meds_de_branded.csv', index=False, header=True, sep = '|')
 drug_names.to_csv('meds_de_branded_stats.csv', index=False, header=True)
 print('\n' + 'Finished.')
