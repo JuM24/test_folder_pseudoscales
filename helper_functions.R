@@ -460,7 +460,7 @@ outcome_effect_parallel <- function(version,
                                     other_predictors = c(''),
                                     file_path = getwd(), 
                                     output_file_name,
-                                    core_number = round(0.8*parallel::detectCores())){
+                                    core_number = 1){
   
   
   # error messages for combinations of arguments that have not been implemented
@@ -505,7 +505,11 @@ outcome_effect_parallel <- function(version,
   cols_relevant <- which(burden_scale_colnames %in% exposure_colnames)
   
   # clear unnecessary objects so they are not copied to the parallel workers
-  rm(output, scales, burden_scales); gc()    
+  rm(output, scales, burden_scales); gc()   
+  
+  # create and export the descriptor for the big matrix
+  big_desc <- describe(burden_scales_big_mat)
+  saveRDS(big_desc, file = 'temp/big_matrix_desc.rds')
   
   
   
@@ -513,122 +517,134 @@ outcome_effect_parallel <- function(version,
   library(doParallel)
   
   set.seed(6)
-  registerDoParallel(cores = core_number) # initialise parallel workers
+  
+  # initialise parallel workers
+  cl <- makeCluster(core_number)
+  registerDoParallel(cl)
+  
+  clusterEvalQ(cl, {
+    library(bigmemory)
+    library(tidyverse)
+  })
   
   # access the indices saved above
-  outcome <- foreach(i = cols_relevant,
+  outcome <- foreach(i = cols_relevant[1:50],
                      .combine = 'rbind', 
-                     .packages = c('tidyverse', 'caret', 'marginaleffects', 'smotefamily')) %dopar% {
-                       
-                       
-                       source('helper_functions.R')
-                       
-                       # the name of the burden scale (exposure) in this iteration
-                       scale_name <- burden_scale_colnames[i]
-                       
-                       # the name and index of the scale-specific non-scale 
-                       # polypharmacy variable for this iteration
-                       poly_0 <- paste0(scale_name, '_alt')
-                       i_alt <- which(burden_scale_colnames == poly_0)
-                       
-                       # covariates used for adjustment and SMOTE
-                       if (outcome_name == 'death'){
-                         covs_compl <- c('sex', 'age', 'data_provider_imputed', 'education_0', 'deprivation', 
-                                         'alc_freq_0', 'waist_0', 'smoking_0', 'phys_act_0', 'diabetes', 
-                                         'cerebrovascular', 'respiratory', 'hepatic', 'flu', 'heart', 'cancer_colon', 
-                                         'cancer_prostate_ovary', 'cancer_lung', 'cancer_breast')
-                       } else if (outcome_name == 'dementia'){
-                         covs_compl <- c('sex', 'age', 'data_provider_imputed', 'education_0', 'deprivation', 
-                                         'g_0', 'pollution_pc', 'alc_freq_0', 'waist_0', 'smoking_0', 
-                                         'phys_act_0', 'mood_dis', 'diabetes', 'hyperlip', 'hear_loss_any', 
-                                         'cns_infl', 'cns_atroph', 'cns_mov', 'cns_demyel', 'cns_parox', 
-                                         'cns_other', 'cns_cancer', 'cns_tbi', 'hypertension', 'heart', 
-                                         'soc_isol_0', 'cerebrovascular', 'lonely_0', 'depressed_0')
-                       } else if (outcome_name == 'delirium'){
-                         covs_compl <- c('sex', 'age', 'data_provider_imputed', 'education_0', 'deprivation', 
-                                         'g_0', 'alc_freq_0', 'waist_0', 'smoking_0', 'phys_act_0', 
-                                         'mood_dis', 'psych_dis',  'sleep_dis_any', 'vision_problem', 
-                                         'hear_loss_any', 'cns_any', 'endocrine_dis', 'nutr_dis', 
-                                         'metabolic_dis', 'cerebrovascular', 'soc_isol_0', 'lonely_0')
-                       }
-                       
-                       # create data frame for this iteration by combining
-                       # the outcome of interest, covariates, follow-up info,
-                       # and scale-specific values from the big matrix
-                       scale_df <- other_variables[, c('id', outcome_name, covs_compl,
-                                                       'follow_up', 'status')]
-                       scale_df[[scale_name]] <- burden_scales_big_mat[, i]
-                       scale_df[[poly_0]] <- burden_scales_big_mat[, i_alt]
-                       
-                       # just keep non-missing rows
-                       scale_df <- scale_df[complete.cases(scale_df), ]
-                       scale_df$id <- NULL
-                       
-                       # define the covariates depending on the adjustment argument
-                       if (control == 'basic'){
-                         predictor_names <- ''
-                       } else if (control == 'full'){
-                         predictor_names <- setdiff(names(scale_df), 
-                                                    c(outcome_name, scale_name,
-                                                      'follow_up', 'status'))
-                       }
-                       # collapse into a single string with variables separated by "+"
-                       predictor_str <- paste(predictor_names, collapse = ' + ')
-                       
-                       
-                       # run models
-                       model <- run_models(df = scale_df, 
-                                           model_type = model_type, 
-                                           exposure = scale_name, 
-                                           covariates = predictor_str,
-                                           outcome_name = outcome_name,
-                                           control = control,
-                                           competing_death = competing_death)
-                       model_output <- model[[1]]
-                       estimates <- model[[2]]
-                       
-                       
-                       
-                       # potentially apply SMOTE
-                       if (smote == TRUE){
-                         scale_df_smote <- smote_df(df = scale_df, 
-                                                    outcome_name = outcome_name)
-                         
-                         # run models with SMOTE data
-                         model_smote <- run_models(df = scale_df_smote,
-                                                   model_type = model_type, 
-                                                   exposure = scale_name, 
-                                                   covariates = predictor_str,
-                                                   outcome_name = outcome_name,
-                                                   control = control,
-                                                   competing_death = competing_death)
-                         model_output_smote <- model_smote[[1]]
-                         estimates_smote <- model_smote[[2]]
-                         
-                         
-                         
-                       } else if (smote == FALSE) {
-                         # if SMOTE is FALSE, set the results to the values
-                         # of the non-SMOTE analysis
-                         scale_df_smote <- scale_df[]
-                         model_output_smote <- model_output
-                         estimates_smote <- estimates
-                       }
-                       
-                       # extract effect sizes and create temporary data frame
-                       all_outcomes <- create_temp_df(model_type = model_type,
-                                                      other_predictors = other_predictors,
-                                                      model_output = model_output,
-                                                      model_output_smote = model_output_smote,
-                                                      estimates = estimates,
-                                                      estimates_smote = estimates_smote,
-                                                      predictor_var = scale_name,
-                                                      scale_name = scale_name,
-                                                      scale_df = scale_df,
-                                                      scale_df_smote = scale_df_smote)
-                       
-                       return(list(all_outcomes, estimates))
-                     }
+                     .packages = c('tidyverse', 'caret', 'marginaleffects', 
+                                   'smotefamily', 'bigmemory')) %dopar% {
+                                     
+                                     source('helper_functions.R')
+                                     
+                                     # load the descriptor file and attach the big matrix
+                                     big_desc <- readRDS('temp/big_matrix_desc.rds')
+                                     burden_scales_big_mat <- attach.big.matrix(big_desc)
+                                     
+                                     # the name of the burden scale (exposure) in this iteration
+                                     scale_name <- burden_scale_colnames[i]
+                                     
+                                     # the name and index of the scale-specific non-scale 
+                                     # polypharmacy variable for this iteration
+                                     poly_0 <- paste0(scale_name, '_alt')
+                                     i_alt <- which(burden_scale_colnames == poly_0)
+                                     
+                                     # covariates used for adjustment and SMOTE
+                                     if (outcome_name == 'death'){
+                                       covs_compl <- c('sex', 'age', 'data_provider_imputed', 'education_0', 'deprivation', 
+                                                       'alc_freq_0', 'waist_0', 'smoking_0', 'phys_act_0', 'diabetes', 
+                                                       'cerebrovascular', 'respiratory', 'hepatic', 'flu', 'heart', 'cancer_colon', 
+                                                       'cancer_prostate_ovary', 'cancer_lung', 'cancer_breast')
+                                     } else if (outcome_name == 'dementia'){
+                                       covs_compl <- c('sex', 'age', 'data_provider_imputed', 'education_0', 'deprivation', 
+                                                       'g_0', 'pollution_pc', 'alc_freq_0', 'waist_0', 'smoking_0', 
+                                                       'phys_act_0', 'mood_dis', 'diabetes', 'hyperlip', 'hear_loss_any', 
+                                                       'cns_infl', 'cns_atroph', 'cns_mov', 'cns_demyel', 'cns_parox', 
+                                                       'cns_other', 'cns_cancer', 'cns_tbi', 'hypertension', 'heart', 
+                                                       'soc_isol_0', 'cerebrovascular', 'lonely_0', 'depressed_0')
+                                     } else if (outcome_name == 'delirium'){
+                                       covs_compl <- c('sex', 'age', 'data_provider_imputed', 'education_0', 'deprivation', 
+                                                       'g_0', 'alc_freq_0', 'waist_0', 'smoking_0', 'phys_act_0', 
+                                                       'mood_dis', 'psych_dis',  'sleep_dis_any', 'vision_problem', 
+                                                       'hear_loss_any', 'cns_any', 'endocrine_dis', 'nutr_dis', 
+                                                       'metabolic_dis', 'cerebrovascular', 'soc_isol_0', 'lonely_0')
+                                     }
+                                     
+                                     # create data frame for this iteration by combining
+                                     # the outcome of interest, covariates, follow-up info,
+                                     # and scale-specific values from the big matrix
+                                     scale_df <- other_variables[, c('id', outcome_name, covs_compl,
+                                                                     'follow_up', 'status')]
+                                     scale_df[[scale_name]] <- burden_scales_big_mat[, i]
+                                     scale_df[[poly_0]] <- burden_scales_big_mat[, i_alt]
+                                     
+                                     # just keep non-missing rows
+                                     scale_df <- scale_df[complete.cases(scale_df), ]
+                                     scale_df$id <- NULL
+                                     
+                                     # define the covariates depending on the adjustment argument
+                                     if (control == 'basic'){
+                                       predictor_names <- ''
+                                     } else if (control == 'full'){
+                                       predictor_names <- setdiff(names(scale_df), 
+                                                                  c(outcome_name, scale_name,
+                                                                    'follow_up', 'status'))
+                                     }
+                                     # collapse into a single string with variables separated by "+"
+                                     predictor_str <- paste(predictor_names, collapse = ' + ')
+                                     
+                                     
+                                     # run models
+                                     model <- run_models(df = scale_df, 
+                                                         model_type = model_type, 
+                                                         exposure = scale_name, 
+                                                         covariates = predictor_str,
+                                                         outcome_name = outcome_name,
+                                                         control = control,
+                                                         competing_death = competing_death)
+                                     model_output <- model[[1]]
+                                     estimates <- model[[2]]
+                                     
+                                     
+                                     
+                                     # potentially apply SMOTE
+                                     if (smote == TRUE){
+                                       scale_df_smote <- smote_df(df = scale_df, 
+                                                                  outcome_name = outcome_name)
+                                       
+                                       # run models with SMOTE data
+                                       model_smote <- run_models(df = scale_df_smote,
+                                                                 model_type = model_type, 
+                                                                 exposure = scale_name, 
+                                                                 covariates = predictor_str,
+                                                                 outcome_name = outcome_name,
+                                                                 control = control,
+                                                                 competing_death = competing_death)
+                                       model_output_smote <- model_smote[[1]]
+                                       estimates_smote <- model_smote[[2]]
+                                       
+                                       
+                                       
+                                     } else if (smote == FALSE) {
+                                       # if SMOTE is FALSE, set the results to the values
+                                       # of the non-SMOTE analysis
+                                       scale_df_smote <- scale_df[]
+                                       model_output_smote <- model_output
+                                       estimates_smote <- estimates
+                                     }
+                                     
+                                     # extract effect sizes and create temporary data frame
+                                     all_outcomes <- create_temp_df(model_type = model_type,
+                                                                    other_predictors = other_predictors,
+                                                                    model_output = model_output,
+                                                                    model_output_smote = model_output_smote,
+                                                                    estimates = estimates,
+                                                                    estimates_smote = estimates_smote,
+                                                                    predictor_var = scale_name,
+                                                                    scale_name = scale_name,
+                                                                    scale_df = scale_df,
+                                                                    scale_df_smote = scale_df_smote)
+                                     
+                                     return(list(all_outcomes, estimates))
+                                   }
   
   # shut down all workers
   stopImplicitCluster()
@@ -726,9 +742,9 @@ prep_for_analysis <- function(df,
   df <- df %>% 
     mutate(across(starts_with('score_'), ~ outliers(.x, var_metric = 4, method = 'SD')))
   
-  # normalise all numerical variables except outcome
+  # normalise all numerical variables
   numeric_columns <- sapply(df, is.numeric)
-  numeric_columns[which(colnames(df) %in% c(outcome_name, 
+  numeric_columns[which(colnames(df) %in% c(outcome_name, 'status',
                                             paste0('follow_up_', outcome_name)))] <- FALSE
   df[numeric_columns] <- lapply(df[numeric_columns], function(x) as.vector(scale(x)))
   
