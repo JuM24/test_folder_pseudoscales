@@ -518,7 +518,7 @@ outcome_effect_parallel <- function(version,
   # access the indices saved above
   outcome <- foreach(i = cols_relevant,
                      .combine = 'rbind', 
-                     .packages = c('tidyverse', 'caret', 'marginaleffects', 'smotefamily')) %do% {
+                     .packages = c('tidyverse', 'caret', 'marginaleffects', 'smotefamily')) %dopar% {
                        
                        
                        source('helper_functions.R')
