@@ -524,14 +524,12 @@ outcome_effect_parallel <- function(version,
   exposure_colnames <- burden_scale_colnames[!grepl('alt$', burden_scale_colnames)]
   cols_relevant <- which(burden_scale_colnames %in% exposure_colnames)
   
-  # clear unnecessary objects so they are not copied to the parallel workers
-  rm(output, scales, burden_scales); gc()   
-  
   # create and export the descriptor for the big matrix
   big_desc <- describe(burden_scales_big_mat)
   saveRDS(big_desc, file = 'temp/big_matrix_desc.rds')
   
-  
+  # clear unnecessary objects so they are not copied to the parallel workers
+  rm(output, scales, burden_scales); gc()    
   
   library(foreach)
   library(doFuture)
@@ -553,7 +551,7 @@ outcome_effect_parallel <- function(version,
                                             seed = TRUE)) %dofuture% {
                                               
                                               source('helper_functions.R')
-                                              
+
                                               # load the descriptor file and attach the big matrix
                                               big_desc <- readRDS('temp/big_matrix_desc.rds')
                                               burden_scales_big_mat <- attach.big.matrix(big_desc)
@@ -572,7 +570,6 @@ outcome_effect_parallel <- function(version,
                                               # and scale-specific values from the big matrix
                                               analytic_df[[scale_name]] <- burden_scales_big_mat[, i]
                                               analytic_df[[poly_0]] <- burden_scales_big_mat[, i_alt]
-                                              rm(burden_scales_big_mat); gc()
                                               
                                               # just keep non-missing rows
                                               analytic_df <- analytic_df[complete.cases(analytic_df), ]
@@ -641,6 +638,11 @@ outcome_effect_parallel <- function(version,
                                                                              scale_df = analytic_df,
                                                                              scale_df_smote = analytic_df_smote)
                                               
+                                              # change estimates to NA to reduce size on disk
+                                              if (model_type == 'logistic'){
+                                                estimates <- c(NA)
+                                              }
+                                              
                                               return(list(all_outcomes, estimates))
                                             }
   
@@ -655,6 +657,7 @@ outcome_effect_parallel <- function(version,
     rm(outcome)
   } else if (model_type == 'survival'){
     survival_data <- outcome[, 2]
+    rm(outcome)
   }
   
   # remove nonsensical columns for SMOTE if SMOTE not run
