@@ -74,20 +74,20 @@ cancer_subtype <- function(df, icd9, icd10, subtype){
     filter(eid %in% subtype_codes$eid) %>% arrange(eid)
   # replace irrelevant codes with the placeholder 'DUMMY'
   subtype_codes <- subtype_codes %>%
-    mutate(across(starts_with("X40013"), ~ replace_not_in_icd9(.x, icd9) )) %>%
-    mutate(across(starts_with("X40006"), ~ replace_not_in_icd10(.x, icd10) ))
+    mutate(across(starts_with('X40013'), ~ replace_not_in_icd9(.x, icd9) )) %>%
+    mutate(across(starts_with('X40006'), ~ replace_not_in_icd10(.x, icd10) ))
   # move NAs to the right
   subtype_codes <- as.data.frame(t(apply(subtype_codes, 1, move_nas_to_right)), 
                                  stringsAsFactors = FALSE)
   # remove empty columns (all NAs)
   subtype_codes <- Filter(function(x)!all(is.na(x)), subtype_codes)
   # retain only dates that refer to the relevant diagnosis
-  subtype_dates[is.na(subtype_codes) | subtype_codes == "DUMMY"] <- NA
+  subtype_dates[is.na(subtype_codes) | subtype_codes == 'DUMMY'] <- NA
   # remove rows with all NAs
   subtype_dates <- subtype_dates %>%
     filter(rowSums(is.na(select(., -eid))) != ncol(.) - 1) %>%
     # calculate the earliest date and select relevant columns
-    mutate(subtype_date = reduce(across(starts_with("X40005")), pmin, na.rm = TRUE)) %>%
+    mutate(subtype_date = reduce(across(starts_with('X40005')), pmin, na.rm = TRUE)) %>%
     select(eid, subtype_date)
   colnames(subtype_dates) <- c('id', paste0('cancer_', subtype, '_date'))
   return(subtype_dates)
@@ -109,7 +109,7 @@ Mode <- function(x, na.rm = FALSE) {
 # This code bind all pseudo-scales into a single data frame and exports as .RDS. 
 # It also exports a list with the n's for the individual scales
 # The argument 'version' determines the type of simulation that was performed.
-combine_scales <- function(version = '', j_max = 20,  years = c(2015, 2015)){
+combine_scales <- function(version, j_max = 20,  years){
   library(tidyverse)
   scale_names <- c()
   if (version == 'within_achb' | version == 'within_all'){
@@ -195,7 +195,7 @@ combine_scales <- function(version = '', j_max = 20,  years = c(2015, 2015)){
 #   - it saves the output to disk in the current directory
 
 
-prepare_scales <- function(version, outcome_name, year_range = c(2015, 2015)){
+prepare_scales <- function(version, outcome_name, year_range){
   library(tidyverse)
   library(lubridate)
   
@@ -281,7 +281,7 @@ prepare_scales <- function(version, outcome_name, year_range = c(2015, 2015)){
   df <- df[ !is.na(df[[outcome_name]]), ]
   
   # calculate age at the last year of sampling
-  df$date_achb_last <- ymd(paste0(df$year_achb_last, "-12-31"))
+  df$date_achb_last <- ymd(paste0(df$year_achb_last, '-12-31'))
   df$age <- as.numeric(difftime(df$date_achb_last, 
                                 as.Date(df$birth_date, format = '%Y-%m-%d'), 
                                 units = 'days'))/365.25
@@ -294,10 +294,8 @@ prepare_scales <- function(version, outcome_name, year_range = c(2015, 2015)){
   if (outcome_name != 'death'){
     df$death <- ifelse(!is.na(df$death_date), 1, 0)
     df$status <- 0
-    df$status[df$dementia == 1] <- 1
-    # those diagnosed with dementia at death still count as dementia cases
     df$status[df$death == 1] <- 2
-    df$status[df$dementia_date == df$death_date] <- 1
+    df$status[df[[outcome_name]] == 1] <- 1
   } else{
     df$status <- df$death
   }
@@ -371,7 +369,7 @@ prepare_scales <- function(version, outcome_name, year_range = c(2015, 2015)){
   meds <- data.frame(meds)
   meds <- merge(df[, c('id', 'sex', 'age', 'data_provider', 
                        'data_provider_imputed', 'sampling_time', outcome_name,
-                       'status',
+                       'status', censor_date,
                        paste0('follow_up_', outcome_name))], 
                 meds, 
                 by = 'id')
@@ -541,12 +539,22 @@ outcome_effect_parallel <- function(version,
   # access the indices saved above
   outcome <- foreach(i = cols_relevant,
                      .combine = 'rbind', 
-                     .options.future = list(packages = c('tidyverse', 'caret', 'marginaleffects', 
-                                                         'smotefamily', 'bigmemory'), 
-                                            globals = c('analytic_df', 'burden_scale_colnames', 'cols_relevant',
-                                                        'version', 'outcome_name', 'control',
-                                                        'smote', 'model_type', 'competing_death',
-                                                        'other_predictors', 'file_path', 
+                     .options.future = list(packages = c('tidyverse', 
+                                                         'caret', 
+                                                         'marginaleffects', 
+                                                         'smotefamily', 
+                                                         'bigmemory'), 
+                                            globals = c('analytic_df', 
+                                                        'burden_scale_colnames', 
+                                                        'cols_relevant',
+                                                        'version', 
+                                                        'outcome_name', 
+                                                        'control', 
+                                                        'smote', 
+                                                        'model_type', 
+                                                        'competing_death',
+                                                        'other_predictors', 
+                                                        'file_path', 
                                                         'output_file_name'), 
                                             seed = TRUE)) %dofuture% {
                                               
@@ -874,7 +882,7 @@ smote_df <- function(df,
   # ordinal variables to numeric (required for KNN)
   df_new[ordinals] <- lapply(df_new[ordinals], as.numeric)
   # one-hot encoding for nominal variables
-  dmy <- dummyVars(" ~ .", data = df_new[, -which(names(df_new) == outcome_name)])
+  dmy <- dummyVars(' ~ .', data = df_new[, -which(names(df_new) == outcome_name)])
   X <- data.frame(predict(dmy, newdata = df_new[, -which(names(df_new) == outcome_name)]))
   target <- df_new[[outcome_name]]
   # apply SMOTE
