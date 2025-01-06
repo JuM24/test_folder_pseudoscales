@@ -195,11 +195,27 @@ alcohol[alcohol == -3] <- NA
 
 ## level of physical activity in the past 4 weeks:
 phys_act <- data_all %>%
-  select(eid, X6164.0.0) %>%
+  select(eid, starts_with('X6164.0')) %>%
   mutate(phys_act_0 = apply(select(., X6164.0.0), 1, 
                             function(x) phys_act_classify(x))) %>%
-  rename(id = eid) %>%
-  select(id, phys_act_0)
+  mutate(phys_act_1 = apply(select(., X6164.0.1), 1, 
+                            function(x) phys_act_classify(x))) %>%
+  mutate(phys_act_2 = apply(select(., X6164.0.2), 1, 
+                            function(x) phys_act_classify(x))) %>%
+  mutate(phys_act_3 = apply(select(., X6164.0.3), 1, 
+                            function(x) phys_act_classify(x))) %>%
+  mutate(phys_act_4 = apply(select(., X6164.0.4), 1, 
+                            function(x) phys_act_classify(x))) %>%
+  rename(id = eid)
+
+phys_act$phys_act <- pmax(phys_act$phys_act_0,
+                          phys_act$phys_act_1,
+                          phys_act$phys_act_2,
+                          phys_act$phys_act_3,
+                          phys_act$phys_act_4, na.rm = TRUE)
+
+phys_act <- phys_act %>%
+  select(id, phys_act)
 
 
 
