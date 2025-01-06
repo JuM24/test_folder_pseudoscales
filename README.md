@@ -16,7 +16,7 @@ Field ID | Description
 `1558` |	Alcohol use frequency
 `20116` |	Smoking status
 `6164` |	Physical activity
-`24003`, `24004`, `24006`, `24016`, `24017`, `24018` | Air pollution
+`24003`, `24004`, `24006` | Air pollution
 `2020` | Loneliness
 `2050` | Depressive mood
 `709`, `1031`, `6160` | Social isolation
