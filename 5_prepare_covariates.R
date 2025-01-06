@@ -259,13 +259,11 @@ deprivation <- data_all %>%
 ## air pollution
 # create means across years and rename columns
 pollution <- data_all %>%
-  select(eid, starts_with(c('X24003.', 'X24004.', 'X24006.', 'X24016.', 
-                            'X24017.', 'X24018.'))) %>%
+  select(eid, starts_with(c('X24003.', 'X24004.', 'X24006.'))) %>%
   rename(id = eid, 
          pollution_nox = X24004.0.0, 
-         pollution_25 = X24006.0.0) %>%
-  mutate(pollution_no2 = rowMeans(across(c(
-    X24016.0.0, X24017.0.0, X24018.0.0, X24003.0.0)), na.rm = TRUE)) %>%
+         pollution_25 = X24006.0.0,
+         pollution_no2 = X24003.0.0) %>%
   select(id, pollution_nox, pollution_no2, pollution_25)
 # scale the variables
 pollution[, c('pollution_nox', 'pollution_no2', 'pollution_25')] <- 
@@ -275,11 +273,11 @@ pollution[, c('pollution_nox', 'pollution_no2', 'pollution_25')] <-
 # dementia in a recent systematic review (Peters et al., 2019)
 pollution$pollution_pc <- psych::principal(
   r = select(pollution, pollution_no2, pollution_nox, pollution_25), 
-  nfactors=1, 
-  rotate='none', 
-  scores=T, 
-  covar=FALSE, 
-  missing=F)$scores[, 1]
+  nfactors = 1, 
+  rotate = 'none', 
+  scores = T, 
+  covar = FALSE, 
+  missing = F)$scores[, 1]
 pollution <- pollution %>%
   select(id, pollution_pc)
 
