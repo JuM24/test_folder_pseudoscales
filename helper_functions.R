@@ -369,7 +369,7 @@ prepare_scales <- function(version, outcome_name, year_range){
   meds <- data.frame(meds)
   meds <- merge(df[, c('id', 'sex', 'age', 'data_provider', 
                        'data_provider_imputed', 'sampling_time', outcome_name,
-                       'status', censor_date,
+                       'status', 'censor_date',
                        paste0('follow_up_', outcome_name))], 
                 meds, 
                 by = 'id')
@@ -384,7 +384,8 @@ prepare_scales <- function(version, outcome_name, year_range){
   
   # identify columns to mutate
   columns_to_mutate <- setdiff(grep('_date$', names(meds), value = TRUE), 
-                               c('birth_date', 'death_date', date_outcome))
+                               c('birth_date', 'death_date', date_outcome,
+                                 'censor_date'))
   # change first dates of diagnosis to years
   meds[columns_to_mutate] <- lapply(meds[columns_to_mutate], function(col) {
     year(as.Date(col, format = '%d/%m/%Y'))
@@ -396,7 +397,7 @@ prepare_scales <- function(version, outcome_name, year_range){
   # if the date of occurrence is NA, change disease coding to 0, 
   # effectively removing cases after end of sampling
   disease_cols <- str_remove_all(names(meds)[str_detect(names(meds), '_date$')], '_date')
-  disease_cols <- disease_cols[disease_cols != 'birth']
+  disease_cols <- disease_cols[!disease_cols %in% c('birth', 'censor', 'death', outcome_name)]
   meds <- meds %>% 
     mutate(across(all_of(disease_cols), 
                   ~if_else(is.na(meds[[paste0(cur_column(), '_date')]]), 0, .)))
@@ -451,9 +452,9 @@ prepare_scales <- function(version, outcome_name, year_range){
 
 outcome_effect_parallel <- function(version, 
                                     outcome_name, 
-                                    control = 'full', 
+                                    control, 
                                     smote = FALSE,
-                                    model_type = 'logistic',
+                                    model_type,
                                     competing_death = FALSE,
                                     other_predictors = c(''),
                                     file_path = getwd(), 
@@ -497,19 +498,19 @@ outcome_effect_parallel <- function(version,
   # covariates used for adjustment and SMOTE
   if (outcome_name == 'death'){
     covs_compl <- c('sex', 'age', 'data_provider_imputed', 'education_0', 'deprivation', 
-                    'alc_freq_0', 'waist_0', 'smoking_0', 'phys_act_0', 'diabetes', 
+                    'alc_freq_0', 'waist_0', 'smoking_0', 'phys_act', 'diabetes', 
                     'cerebrovascular', 'respiratory', 'hepatic', 'flu', 'heart', 'cancer_colon', 
                     'cancer_prostate_ovary', 'cancer_lung', 'cancer_breast')
   } else if (outcome_name == 'dementia'){
     covs_compl <- c('sex', 'age', 'data_provider_imputed', 'education_0', 'deprivation', 
                     'g_0', 'pollution_pc', 'alc_freq_0', 'waist_0', 'smoking_0', 
-                    'phys_act_0', 'mood_dis', 'diabetes', 'hyperlip', 'hear_loss_any', 
+                    'phys_act', 'mood_dis', 'diabetes', 'hyperlip', 'hear_loss_any', 
                     'cns_infl', 'cns_atroph', 'cns_mov', 'cns_demyel', 'cns_parox', 
                     'cns_other', 'cns_cancer', 'cns_tbi', 'hypertension', 'heart', 
                     'soc_isol_0', 'cerebrovascular', 'lonely_0', 'depressed_0')
   } else if (outcome_name == 'delirium'){
     covs_compl <- c('sex', 'age', 'data_provider_imputed', 'education_0', 'deprivation', 
-                    'g_0', 'alc_freq_0', 'waist_0', 'smoking_0', 'phys_act_0', 
+                    'g_0', 'alc_freq_0', 'waist_0', 'smoking_0', 'phys_act', 
                     'mood_dis', 'psych_dis',  'sleep_dis_any', 'vision_problem', 
                     'hear_loss_any', 'cns_any', 'endocrine_dis', 'nutr_dis', 
                     'metabolic_dis', 'cerebrovascular', 'soc_isol_0', 'lonely_0')
@@ -559,7 +560,7 @@ outcome_effect_parallel <- function(version,
                                             seed = TRUE)) %dofuture% {
                                               
                                               source('helper_functions.R')
-
+                                              
                                               # load the descriptor file and attach the big matrix
                                               big_desc <- readRDS('temp/big_matrix_desc.rds')
                                               burden_scales_big_mat <- attach.big.matrix(big_desc)
@@ -723,7 +724,7 @@ outcome_effect_parallel <- function(version,
 prep_for_analysis <- function(df, 
                               model_type, 
                               outcome_name){
-
+  
   # change names and positions of some variables to that code below works well
   df <- df %>% 
     rename(drug_number_unique = score_drug_number_unique, drug_number = score_drug_number) %>% 
@@ -839,7 +840,6 @@ create_temp_df <- function(model_type,
       n_id_smote = nrow(scale_df_smote)
     )
     
-    
     # combined data frame across workers
     combined_outcome <- cbind(temp_outcome, other_predictor_df)
     
@@ -877,7 +877,7 @@ smote_df <- function(df,
   dup_size <- floor((sum(df_new[[outcome_name]] == '0') / 
                        sum(df_new[[outcome_name]] == '1'))/3)
   # determine ordinal variables (as opposed to nominal) - required for KNN
-  ordinals <- c('alc_freq_0', 'phys_act_0', 'depressed_0', 'lonely_0', 'sol_isol_0')
+  ordinals <- c('alc_freq_0', 'phys_act', 'depressed_0', 'lonely_0', 'sol_isol_0')
   ordinals <- ordinals[ordinals %in% names(df_new)] 
   # ordinal variables to numeric (required for KNN)
   df_new[ordinals] <- lapply(df_new[ordinals], as.numeric)
